@@ -48,17 +48,23 @@ public final class BridgeService extends Service implements DroidClient.Platform
     private void acquireLocks() {
         try {
             android.os.PowerManager power = (android.os.PowerManager) getSystemService(POWER_SERVICE);
-            if (power != null && wakeLock == null) {
-                wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "regedit:bridge");
-                wakeLock.setReferenceCounted(false);
-                wakeLock.acquire();
+            if (power != null) {
+                if (wakeLock == null) {
+                    wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "regedit:bridge");
+                    wakeLock.setReferenceCounted(false);
+                }
+                // 不能只看 != null：系统会把长时间持有的锁标成 DISABLED 而对象还在，
+                // 这时必须重新 acquire，否则息屏后网络照样被掐。
+                if (!wakeLock.isHeld()) wakeLock.acquire();
             }
             android.net.wifi.WifiManager wifi =
                     (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
-            if (wifi != null && wifiLock == null) {
-                wifiLock = wifi.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "regedit:bridge");
-                wifiLock.setReferenceCounted(false);
-                wifiLock.acquire();
+            if (wifi != null) {
+                if (wifiLock == null) {
+                    wifiLock = wifi.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "regedit:bridge");
+                    wifiLock.setReferenceCounted(false);
+                }
+                if (!wifiLock.isHeld()) wifiLock.acquire();
             }
         } catch (RuntimeException error) {
             log("唤醒锁申请失败（不影响连接，但息屏后可能被系统挂起）：" + error);
@@ -118,6 +124,9 @@ public final class BridgeService extends Service implements DroidClient.Platform
     }
 
     private void startBridge() {
+        // 每次启动/重连都重新确认唤醒锁：onCreate 只跑一次，而 stopBridge 会释放锁，
+        // 之前把申请放在 onCreate，重连后就再也不上锁了（实测 02:35 被释放后一直没回来）。
+        acquireLocks();
         if (client != null) return;
         Prefs prefs = new Prefs(this);
         if (!prefs.configured()) {

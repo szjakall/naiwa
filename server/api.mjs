@@ -119,6 +119,7 @@ import {
 	listConversations,
 	renameConversation,
 	sendMessage as sendChatMessage,
+	setGoal,
 	stats as chatStats,
 } from "./chat.mjs";
 import {
@@ -489,7 +490,7 @@ on("GET", "/api/reports", async ({ res }) => {
 
 on("POST", "/api/reports", async ({ req, res }) => {
 	const body = await readJson(req);
-	const result = generateReport({ taskId: body.taskId, title: body.title });
+	const result = generateReport({ taskId: body.taskId, title: body.title, findingIds: body.findingIds });
 	sendJson(res, 200, result);
 });
 
@@ -1618,9 +1619,11 @@ on("PATCH", "/api/chat/:id", async ({ req, res, params }) => {
 	const body = await readJson(req);
 	const conversation = body.archived !== undefined
 		? archiveConversation(params.id, body.archived === true)
-		: body.title
-			? renameConversation(params.id, body.title)
-			: null;
+		: body.goal !== undefined
+			? setGoal(params.id, body.goal)
+			: body.title
+				? renameConversation(params.id, body.title)
+				: null;
 	if (!conversation) return sendError(res, 404, "会话不存在");
 	sendJson(res, 200, conversation);
 });

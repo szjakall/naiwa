@@ -128,17 +128,43 @@ export function buildMarkdown({ title, task, findings, assets, traffic }) {
 	return lines.join("\n");
 }
 
-export function generateReport({ taskId, title }) {
+/**
+ * 生成报告。三种取材方式，按优先级：
+ *   1. findingIds —— 操作员在页面上勾选的漏洞（最常用：只想把高危写进报告）
+ *   2. taskId     —— 某个任务下的全部漏洞
+ *   3. 都不给     —— 全部未关闭的漏洞
+ * 资产按"这些漏洞所属的资产"取，没挂资产的漏洞不会把整库资产拖进来。
+ */
+export function generateReport({ taskId, title, findingIds }) {
 	const task = taskId ? store.state.tasks.find((entry) => entry.id === taskId) : null;
-	const findings = store.state.findings.filter((finding) =>
-		taskId ? finding.taskId === taskId : finding.status !== "closed",
-	);
+	const picked = Array.isArray(findingIds) ? findingIds.filter(Boolean) : [];
+
+	let findings;
+	if (picked.length > 0) {
+		const wanted = new Set(picked);
+		// 勾选优先：即便同时传了 taskId，也只写勾中的那几条，避免"以为只写了高危，
+		// 结果把整个任务的所有漏洞都写进去"。
+		findings = store.state.findings.filter((finding) => wanted.has(finding.id));
+	} else {
+		findings = store.state.findings.filter((finding) =>
+			taskId ? finding.taskId === taskId : finding.status !== "closed",
+		);
+	}
+
 	const assetIds = new Set(findings.map((finding) => finding.assetId).filter(Boolean));
-	const assets = store.state.assets.filter((asset) =>
-		taskId ? asset.taskId === taskId || assetIds.has(asset.id) : true,
-	);
-	const traffic = store.state.traffic.filter((item) => (taskId ? item.taskId === taskId : false));
-	const reportTitle = String(title || "").trim() || (task ? `${task.title} 评估报告` : `评估报告 ${stamp()}`);
+	let assets;
+	if (picked.length > 0) {
+		assets = store.state.assets.filter((asset) => assetIds.has(asset.id));
+	} else {
+		assets = store.state.assets.filter((asset) =>
+			taskId ? asset.taskId === taskId || assetIds.has(asset.id) : true,
+		);
+	}
+	// 勾选模式下没有任务，就不要把"某个任务"的流水硬塞进来
+	const traffic = !picked.length && taskId ? store.state.traffic.filter((item) => item.taskId === taskId) : [];
+	const reportTitle =
+		String(title || "").trim() ||
+		(task ? `${task.title} 评估报告` : picked.length ? `选定漏洞评估报告 ${stamp()}` : `评估报告 ${stamp()}`);
 
 	const markdown = buildMarkdown({ title: reportTitle, task, findings, assets, traffic });
 	const id = store.nextId("rp");
@@ -149,6 +175,9 @@ export function generateReport({ taskId, title }) {
 		id,
 		title: reportTitle,
 		taskId: task?.id ?? null,
+		// 记下取材方式，报告列表里能看出"这份是按勾选生成的"
+		mode: picked.length ? "selected" : taskId ? "task" : "open",
+		findingIds: picked.length ? picked : undefined,
 		findings: findings.length,
 		assets: assets.length,
 		file,
@@ -157,6 +186,6 @@ export function generateReport({ taskId, title }) {
 	};
 	store.state.reports.unshift(report);
 	store.save();
-	store.log("info", `生成报告：${reportTitle}（${id}）`);
+	store.log("info", `生成报告：${reportTitle}（${id}，${findings.length} 条发现）`);
 	return { ok: true, report };
 }

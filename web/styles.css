@@ -1546,3 +1546,86 @@ th.nowrap {
 		grid-template-columns: minmax(0, 1fr);
 	}
 }
+/* 报告生成：漏洞勾选列表 */
+.report-findings {
+	max-height: 240px;
+	overflow: auto;
+	border: 1px solid var(--line-soft);
+	border-radius: 8px;
+	padding: 6px;
+}
+.report-finding {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.report-finding:hover {
+	background: rgba(255, 255, 255, 0.04);
+}
+.report-finding-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 13px;
+}
+
+/* 对话里的工具调用轨迹 */
+.chat-tools {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 10px;
+}
+.chat-tool {
+	border: 1px solid var(--line-soft);
+	border-radius: 7px;
+	padding: 6px 9px;
+	background: rgba(255, 255, 255, 0.02);
+}
+.chat-tool[data-failed] {
+	border-color: rgba(255, 93, 120, 0.35);
+}
+.chat-tool summary {
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	list-style: none;
+}
+.chat-tool summary::-webkit-details-marker {
+	display: none;
+}
+.chat-tool pre {
+	margin: 6px 0 0;
+	padding: 7px 9px;
+	background: rgba(0, 0, 0, 0.28);
+	border-radius: 6px;
+	overflow: auto;
+	max-height: 220px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--muted);
+}
+
+/* 对话状态条与任务目标 */
+.chat-status {
+	padding: 4px 0 12px;
+	border-bottom: 1px solid var(--line-soft);
+	margin-bottom: 14px;
+}
+.chat-goal {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+}
+.chat-goal input {
+	flex: 1;
+	font-size: 12px;
+	padding: 5px 9px;
+}

@@ -33,6 +33,7 @@ const MODULES = [
 	"proxies",
 	"notify",
 	"chat",
+	"chat-tools",
 	"org",
 	"api",
 ];

@@ -93,6 +93,21 @@ export default {
 									<span>${message.at ? fmtTime(message.at).slice(11, 19) : ""}</span>
 								</div>
 								${message.note ? html`<div class="hint-box" style="margin-bottom:8px">${raw(icon("alert", { size: 15 }))}<span>${message.note}</span></div>` : ""}
+								${Array.isArray(message.toolCalls) && message.toolCalls.length
+									? html`<div class="chat-tools">
+											${message.toolCalls.map(
+												(call) => html`<details class="chat-tool" ${call.ok ? "" : "data-failed"}>
+													<summary>
+														${raw(icon("terminal", { size: 14 }))}
+														<span class="mono tiny">${call.name}</span>
+														<span class="tiny muted">${call.ok ? "完成" : "失败"}</span>
+													</summary>
+													<pre class="tiny">${JSON.stringify(call.args, null, 2)}</pre>
+													<pre class="tiny">${call.summary}</pre>
+												</details>`,
+											)}
+										</div>`
+									: ""}
 								<div style="white-space:pre-wrap;${message.error ? "color:#ff9dae" : ""}">${message.content || "（空）"}</div>
 							</div>`,
 						)
@@ -100,13 +115,22 @@ export default {
 
 			// 状态条：让操作员一眼看到"用的是哪个模型、当前这条会话什么状态"，
 			// 而不是发了消息只看到一片空白不知道发生了什么。
-			const statusBar = html`<div class="row tiny muted" style="gap:14px;flex-wrap:wrap;padding:4px 0 12px;border-bottom:1px solid var(--line-soft);margin-bottom:14px">
-				<span>${llmState?.effectiveFrom ? html`模型 <strong style="color:var(--fg)">${llmState.effectiveFrom.modelId}</strong>（${llmState.effectiveFrom.name}）` : html`<span style="color:#ff9dae">未配置模型</span>`}</span>
-				<span>会话 ${current?.messages?.length ?? 0} 条</span>
-				${current?.updatedAt ? html`<span>更新于 ${relTime(current.updatedAt)}</span>` : ""}
-				${llmState?.pool?.calls ? html`<span>调用 ${llmState.pool.calls} 次 · 输入 ${llmState.pool.inputTokens ?? 0} · 输出 ${llmState.pool.outputTokens ?? 0} tokens</span>` : ""}
-				<span class="spacer"></span>
-				<span id="send-status"></span>
+			const statusBar = html`<div class="chat-status">
+				<div class="row tiny muted" style="gap:14px;flex-wrap:wrap">
+					<span>${llmState?.effectiveFrom ? html`模型 <strong style="color:var(--fg)">${llmState.effectiveFrom.modelId}</strong>（${llmState.effectiveFrom.name}）` : html`<span style="color:#ff9dae">未配置模型</span>`}</span>
+					<span>会话 ${current?.messages?.length ?? 0} 条</span>
+					${current?.updatedAt ? html`<span>更新于 ${relTime(current.updatedAt)}</span>` : ""}
+					${llmState?.pool?.calls ? html`<span>调用 ${llmState.pool.calls} 次 · 输入 ${llmState.pool.inputTokens ?? 0} · 输出 ${llmState.pool.outputTokens ?? 0} tokens</span>` : ""}
+					<span class="spacer"></span>
+					<span id="send-status"></span>
+				</div>
+				${current
+					? html`<div class="chat-goal">
+							<span class="tiny muted nowrap">任务目标</span>
+							<input id="chat-goal" placeholder="告诉这个会话最终要交付什么（会注入给模型的指令里）" value="${current.goal ?? ""}" />
+							<button class="btn ghost small" id="save-goal">保存</button>
+						</div>`
+					: ""}
 			</div>`;
 
 			mount(
@@ -204,6 +228,20 @@ export default {
 						await api.del(`/api/chat/${current.id}`);
 						toast("已删除", "success");
 						ctx.go("#/chat");
+						ctx.reload();
+					} catch (error) {
+						toast(error.message, "error");
+					}
+				});
+			}
+
+			// 任务目标：对应原版的 {{.Goal}}，改了之后下一次对话就生效
+			const saveGoal = root.querySelector("#save-goal");
+			if (saveGoal) {
+				saveGoal.addEventListener("click", async () => {
+					try {
+						await api.patch(`/api/chat/${current.id}`, { goal: root.querySelector("#chat-goal").value.trim() });
+						toast("任务目标已保存", "success");
 						ctx.reload();
 					} catch (error) {
 						toast(error.message, "error");

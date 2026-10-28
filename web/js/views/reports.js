@@ -1,5 +1,5 @@
 /**
- * 报告：按任务或按"全部未关闭发现"生成 Markdown，可预览、下载、删除。
+ * 报告：按**勾选的漏洞** / 某个任务 / 全部未关闭发现 生成 Markdown，可预览、下载、删除。
  * 预览走自带的极简 Markdown 渲染，样式和最终文件一致，省一次下载往返。
  */
 
@@ -7,16 +7,25 @@ import { icon } from "../icons.js";
 import { api, html, mount, openOverlay, raw, relTime, renderMarkdown, toast, toNode } from "../core.js";
 import { card, emptyState, inlineError, loading } from "../ui.js";
 
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+
 export default {
 	title: "报告",
 	subtitle: "把一次评估的资产与发现整理成可交付文档",
 
 	async render(root, ctx) {
 		mount(root, loading());
-		let [reports, tasks] = await Promise.all([api.get("/api/reports"), api.get("/api/tasks")]).catch((error) => {
+		let [reports, tasks, findings] = await Promise.all([
+			api.get("/api/reports"),
+			api.get("/api/tasks"),
+			api.get("/api/findings").catch(() => []),
+		]).catch((error) => {
 			mount(root, inlineError(error.message));
-			return [[], []];
+			return [[], [], []];
 		});
+		// 已关闭的不进候选：报告写的是待处理问题
+		findings = (findings ?? []).filter((item) => item.status !== "closed");
+		tasks = tasks ?? [];
 
 		const actions = toNode(html`<button class="btn primary small" id="new-report">
 			${raw(icon("plus", { size: 15 }))}生成报告
@@ -57,12 +66,29 @@ export default {
 			const taskOptions = tasks
 				.map((task) => `<option value="${task.id}">${task.title}（${task.scope?.length ?? 0} 个目标）</option>`)
 				.join("");
+
+			// 漏洞候选按等级排序，方便一眼挑高危
+			const sorted = [...findings].sort(
+				(a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
+			);
+			const findingRows = sorted.length
+				? sorted
+						.map(
+							(finding) => html`<label class="report-finding">
+								<input type="checkbox" data-finding="${finding.id}" />
+								<span class="chip sev-${finding.severity}">${finding.severity}</span>
+								<span class="report-finding-title">${finding.title}</span>
+								<span class="tiny muted nowrap">${finding.target ?? ""}</span>
+							</label>`,
+						)
+				: html`<div class="muted small">没有待处理的漏洞。</div>`;
+
 			const overlay = openOverlay(html`
 				<div class="overlay-head"><h3>生成报告</h3></div>
 				<div class="overlay-body">
 					<label class="field">
 						<span>报告标题</span>
-						<input data-title placeholder="留空则用任务名 + 评估报告" />
+						<input data-title placeholder="留空则按取材方式自动命名" />
 					</label>
 					<label class="field">
 						<span>数据范围</span>
@@ -72,23 +98,50 @@ export default {
 						</select>
 						<span class="hint">可选某个任务的资产、发现与请求流水；也可以汇总所有未关闭的发现。</span>
 					</label>
+					<div class="field">
+						<div class="row" style="margin-bottom:6px">
+							<span>只写选中的漏洞</span>
+							<span class="tiny muted">（勾选后优先于上面的"数据范围"）</span>
+							<div class="spacer"></div>
+							<button class="btn ghost small" data-all>全选</button>
+							<button class="btn ghost small" data-high>仅高危以上</button>
+							<button class="btn ghost small" data-none>清空</button>
+						</div>
+						<div class="report-findings">${findingRows}</div>
+						<span class="hint">不勾选 = 按上面的范围全部写；勾选 = 只写勾中的这几条，资产也只带它们所属的。</span>
+					</div>
 				</div>
 				<div class="overlay-foot">
 					<button class="btn ghost" data-close>取消</button>
 					<button class="btn primary" data-create>生成</button>
 				</div>
-			`);
+			`, { wide: true });
+
+			const boxes = () => [...overlay.panel.querySelectorAll("[data-finding]")];
+			overlay.panel.querySelector("[data-all]").addEventListener("click", () => boxes().forEach((b) => (b.checked = true)));
+			overlay.panel.querySelector("[data-none]").addEventListener("click", () => boxes().forEach((b) => (b.checked = false)));
+			overlay.panel.querySelector("[data-high]").addEventListener("click", () => {
+				for (const box of boxes()) {
+					const row = box.closest(".report-finding");
+					const sev = row?.querySelector(".chip")?.textContent?.trim();
+					box.checked = sev === "critical" || sev === "high";
+				}
+			});
+
 			overlay.panel.querySelector("[data-create]").addEventListener("click", async () => {
 				const button = overlay.panel.querySelector("[data-create]");
+				const findingIds = boxes().filter((b) => b.checked).map((b) => b.dataset.finding);
 				button.disabled = true;
 				button.textContent = "生成中…";
 				try {
 					const result = await api.post("/api/reports", {
 						title: overlay.panel.querySelector("[data-title]").value.trim(),
-						taskId: overlay.panel.querySelector("[data-task]").value || undefined,
+						// 勾了漏洞就不再传任务范围：服务端以 findingIds 优先
+						taskId: findingIds.length ? undefined : overlay.panel.querySelector("[data-task]").value || undefined,
+						findingIds: findingIds.length ? findingIds : undefined,
 					});
 					overlay.close();
-					toast("报告已生成", "success");
+					toast(`报告已生成（${result.report.findings} 条发现）`, "success");
 					reports = [result.report, ...reports];
 					paint();
 				} catch (error) {
