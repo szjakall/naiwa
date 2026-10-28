@@ -1,0 +1,19 @@
+# 运行时数据（账号、令牌、任务/资产/漏洞等业务数据）
+data/
+.devdata*/
+
+# 依赖与构建中间产物
+node_modules/
+android/build/
+android/.gradle/
+
+# 签名密钥：默认不入库。
+# 若需要"任何机器重编的 APK 都能覆盖安装"，可执行 `git add -f android/debug.keystore`，
+# 但请确认仓库不是公开的——这把密钥能签出你设备愿意升级的包。
+*.keystore
+*.jks
+
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db
