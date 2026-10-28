@@ -20,12 +20,18 @@ const LLM_ROLES = [
 	{ id: "wrapup", label: "收尾", hint: "阶段总结与报告叙述" },
 ];
 
+const POOL_DEFAULTS = { calls: 0, failures: 0, tokens: 0, inputTokens: 0, outputTokens: 0 };
+
 function llm() {
-	if (!store.state.llm) store.state.llm = { profiles: [], roles: {}, pool: { calls: 0, failures: 0, tokens: 0 } };
+	if (!store.state.llm) store.state.llm = { profiles: [], roles: {}, pool: { ...POOL_DEFAULTS } };
 	const state = store.state.llm;
 	if (!Array.isArray(state.profiles)) state.profiles = [];
 	if (!state.roles || typeof state.roles !== "object") state.roles = {};
-	if (!state.pool) state.pool = { calls: 0, failures: 0, tokens: 0 };
+	if (!state.pool) state.pool = { ...POOL_DEFAULTS };
+	// 老数据只有 tokens 一个总量，补上拆分项，避免前端显示 undefined
+	for (const [key, value] of Object.entries(POOL_DEFAULTS)) {
+		if (state.pool[key] === undefined) state.pool[key] = value;
+	}
 	return state;
 }
 
@@ -45,17 +51,45 @@ export function listProfiles() {
 	}));
 }
 
+/** 上下文档位：原版以 K 为单位，0/空 视为默认 200K，最大 1000K（1M）。 */
+const DEFAULT_CONTEXT_K = 200;
+const MAX_CONTEXT_K = 1000;
+
+export function clampContextK(value) {
+	const n = Number(value ?? 0);
+	if (!Number.isFinite(n) || n <= 0) return 0; // 0 表示"用默认"
+	return Math.min(Math.round(n), MAX_CONTEXT_K);
+}
+
+/** 档案的上下文窗口（token 数）。0/空 → 200K。 */
+export function contextWindowOf(profile) {
+	const k = clampContextK(profile?.contextWindowK) || DEFAULT_CONTEXT_K;
+	return k * 1000;
+}
+
 export function upsertProfile(input) {
 	const state = llm();
 	const id = String(input.id ?? "").trim() || `lp${randomUUID().slice(0, 8)}`;
 	const existing = state.profiles.find((p) => p.id === id);
-	const apiKey = input.apiKey === "••••••••" ? existing?.apiKey ?? "" : String(input.apiKey ?? "");
+	// 密钥三态：不传 = 保持原值；传掩码 = 保持原值；传明文 = 更新。
+	// 曾经写成"不传就置空"，任何局部更新（改上下文窗口、改限速）都会顺手清掉密钥。
+	const apiKey =
+		input.apiKey === undefined || input.apiKey === null || input.apiKey === "••••••••"
+			? existing?.apiKey ?? ""
+			: String(input.apiKey);
 	const profile = {
 		id,
 		name: String(input.name ?? "").trim() || "未命名档案",
 		baseUrl: String(input.baseUrl ?? "").trim(),
 		apiKey,
 		modelId: String(input.modelId ?? "").trim(),
+		// 以下四项对齐原版的模型档案：上下文窗口决定裁剪阈值，
+		// maxTokens 决定单次输出上限，速率用于限流（0 = 不限）。
+		contextWindowK: clampContextK(input.contextWindowK ?? existing?.contextWindowK),
+		maxTokens: Math.min(Math.max(Number(input.maxTokens ?? existing?.maxTokens ?? 0) || 0, 0), 32768),
+		ratePerSecond: Math.max(Number(input.ratePerSecond ?? existing?.ratePerSecond ?? 0) || 0, 0),
+		ratePerMinute: Math.max(Number(input.ratePerMinute ?? existing?.ratePerMinute ?? 0) || 0, 0),
+		reasoningEffort: String(input.reasoningEffort ?? existing?.reasoningEffort ?? "").trim(),
 		at: existing?.at ?? new Date().toISOString(),
 	};
 	if (!profile.baseUrl) throw new Error("Base URL 不能为空");
@@ -182,16 +216,53 @@ export function llmState() {
 	};
 }
 
-export function recordLlmCall({ ok, tokens }) {
-	const pool = llm().pool;
+/**
+ * 把各家 usage 结构归一成「输入 / 输出 / 缓存 / 推理」四项。
+ *
+ * 不同服务商返回的字段名不统一，混着用会导致统计口径漂移：
+ *   OpenAI 兼容：prompt_tokens / completion_tokens / total_tokens，
+ *                细节在 prompt_tokens_details.cached_tokens、completion_tokens_details.reasoning_tokens
+ *   Anthropic ：input_tokens / output_tokens，缓存单列 cache_read_input_tokens /
+ *                cache_creation_input_tokens（这两项算输入侧）
+ * 任何一项缺失都不该让统计崩掉，缺就是 0。
+ */
+export function normalizeUsage(usage) {
+	const u = usage ?? {};
+	const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+	const input =
+		num(u.prompt_tokens) ||
+		num(u.input_tokens) ||
+		num(u.promptTokens) ||
+		num(u.inputTokens) ||
+		0;
+	const output =
+		num(u.completion_tokens) ||
+		num(u.output_tokens) ||
+		num(u.completionTokens) ||
+		num(u.outputTokens) ||
+		0;
+	const cached = num(u.prompt_tokens_details?.cached_tokens) + num(u.cache_read_input_tokens);
+	const cacheWrite = num(u.cache_creation_input_tokens);
+	const reasoning = num(u.completion_tokens_details?.reasoning_tokens);
+	// total 优先用服务商给的；没给就自己加，避免出现"有输入输出但总量为 0"。
+	const total = num(u.total_tokens) || input + output;
+	return { inputTokens: input, outputTokens: output, totalTokens: total, cachedTokens: cached, cacheWriteTokens: cacheWrite, reasoningTokens: reasoning };
+}
+
+export function recordLlmCall({ ok, tokens, inputTokens, outputTokens }) {
+	const state = llm();
+	const pool = state.pool;
 	pool.calls += 1;
 	if (!ok) pool.failures += 1;
 	if (tokens) pool.tokens += tokens;
+	// 输入输出分开累计：只看总量无法判断是"上下文太长"还是"模型啰嗦"。
+	if (inputTokens) pool.inputTokens = (pool.inputTokens ?? 0) + inputTokens;
+	if (outputTokens) pool.outputTokens = (pool.outputTokens ?? 0) + outputTokens;
 	store.save();
 }
 
 export function resetPool() {
-	llm().pool = { calls: 0, failures: 0, tokens: 0 };
+	llm().pool = { calls: 0, failures: 0, tokens: 0, inputTokens: 0, outputTokens: 0 };
 	store.save();
 	return { ok: true };
 }
@@ -240,11 +311,11 @@ export async function testProfile(id) {
 		}
 		const data = await response.json();
 		const content = data?.choices?.[0]?.message?.content ?? "";
-		const tokens = Number(data?.usage?.total_tokens ?? 0);
-		recordLlmCall({ ok: true, tokens });
+		const usage = normalizeUsage(data?.usage);
+		recordLlmCall({ ok: true, tokens: usage.totalTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
 		return {
 			ok: true,
-			message: `可用：${profile.name} · ${profile.modelId}（${elapsed}ms，${tokens} tokens）`,
+			message: `可用：${profile.name} · ${profile.modelId}（${elapsed}ms，输入 ${usage.inputTokens} / 输出 ${usage.outputTokens} tokens）`,
 			detail: String(content).slice(0, 200),
 		};
 	} catch (error) {

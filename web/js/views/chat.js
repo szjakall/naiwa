@@ -4,8 +4,8 @@
  */
 
 import { icon } from "../icons.js";
-import { api, fmtTime, html, mount, openOverlay, raw, relTime, toast, toNode } from "../core.js";
-import { card, emptyState, inlineError, loading } from "../ui.js";
+import { api, fmtTime, html, mount, raw, relTime, toast, toNode } from "../core.js";
+import { card, inlineError, loading } from "../ui.js";
 
 export default {
 	title: "对话",
@@ -46,11 +46,17 @@ export default {
 			}
 		});
 
-		// 支持 #/chat/<id> 直达
-		const requested = ctx.param;
+		// 支持 #/chat/<id> 直达；不带 id 时自动打开最近一条会话。
+		// 直接进「对话」页却看到"未选择会话"，会让人以为刚才的对话丢了。
+		const requested = ctx.param || list[0]?.id;
 		if (requested) {
 			try {
-				current = await api.get(`/api/chat/${requested}`);
+				const loaded = await api.get(`/api/chat/${requested}`);
+				// 服务端理论上一定给 messages，但这里不能假设：缺字段会让整个页面
+				// 崩在 current.messages.length 上（UI 测试就抓到过）。
+				current = loaded && typeof loaded === "object"
+					? { ...loaded, messages: Array.isArray(loaded.messages) ? loaded.messages : [] }
+					: null;
 			} catch {
 				current = null;
 			}
@@ -78,14 +84,30 @@ export default {
 								<div class="row tiny muted" style="gap:8px;margin-bottom:6px">
 									<span>${message.role === "user" ? "我" : "模型"}</span>
 									${message.model ? html`<span class="chip chip-muted">${message.model}</span>` : ""}
-									${message.tokens ? html`<span>${message.tokens} tokens</span>` : ""}
+									${message.inputTokens ? html`<span title="输入（prompt）token">输入 ${message.inputTokens}</span>` : ""}
+									${message.outputTokens ? html`<span title="输出（completion）token">输出 ${message.outputTokens}</span>` : ""}
+									${message.reasoningTokens ? html`<span title="推理过程消耗的 token">推理 ${message.reasoningTokens}</span>` : ""}
+									${!message.inputTokens && message.tokens ? html`<span>${message.tokens} tokens</span>` : ""}
+									${message.finishReason && message.finishReason !== "stop" ? html`<span class="chip chip-warn">${message.finishReason}</span>` : ""}
 									<span class="spacer"></span>
 									<span>${message.at ? fmtTime(message.at).slice(11, 19) : ""}</span>
 								</div>
-								<div style="white-space:pre-wrap;${message.error ? "color:#ff9dae" : ""}">${message.content}</div>
+								${message.note ? html`<div class="hint-box" style="margin-bottom:8px">${raw(icon("alert", { size: 15 }))}<span>${message.note}</span></div>` : ""}
+								<div style="white-space:pre-wrap;${message.error ? "color:#ff9dae" : ""}">${message.content || "（空）"}</div>
 							</div>`,
 						)
 				: html`<div class="muted small" style="padding:20px 0">还没有消息。${hasModel ? "在下面输入开始。" : "先到「设置 → 模型」加一个端点。"}</div>`;
+
+			// 状态条：让操作员一眼看到"用的是哪个模型、当前这条会话什么状态"，
+			// 而不是发了消息只看到一片空白不知道发生了什么。
+			const statusBar = html`<div class="row tiny muted" style="gap:14px;flex-wrap:wrap;padding:4px 0 12px;border-bottom:1px solid var(--line-soft);margin-bottom:14px">
+				<span>${llmState?.effectiveFrom ? html`模型 <strong style="color:var(--fg)">${llmState.effectiveFrom.modelId}</strong>（${llmState.effectiveFrom.name}）` : html`<span style="color:#ff9dae">未配置模型</span>`}</span>
+				<span>会话 ${current?.messages?.length ?? 0} 条</span>
+				${current?.updatedAt ? html`<span>更新于 ${relTime(current.updatedAt)}</span>` : ""}
+				${llmState?.pool?.calls ? html`<span>调用 ${llmState.pool.calls} 次 · 输入 ${llmState.pool.inputTokens ?? 0} · 输出 ${llmState.pool.outputTokens ?? 0} tokens</span>` : ""}
+				<span class="spacer"></span>
+				<span id="send-status"></span>
+			</div>`;
 
 			mount(
 				root,
@@ -110,13 +132,14 @@ export default {
 								? html`<button class="btn-icon danger" id="del-chat" title="删除会话">${raw(icon("trash", { size: 16 }))}</button>`
 								: "",
 							body: html`
+								${statusBar}
 								<div id="messages" style="max-height:52vh;overflow:auto;padding-right:6px">${messages}</div>
 								<div class="mt-12">
 									<textarea id="composer" rows="3" placeholder="${hasModel ? "输入消息，Ctrl+Enter 发送" : "未配置模型端点"}" ${hasModel && current ? "" : "disabled"}></textarea>
 									<div class="row mt-8">
 										<button class="btn primary small" id="send" ${hasModel && current ? "" : "disabled"}>发送</button>
 										<span class="spacer"></span>
-										<span class="tiny muted" id="send-status"></span>
+										<span class="tiny muted" id="send-inline"></span>
 									</div>
 								</div>
 							`,
@@ -143,17 +166,26 @@ export default {
 					const content = composer.value.trim();
 					if (!content) return;
 					sendButton.disabled = true;
-					root.querySelector("#send-status").textContent = "发送中…";
+					sendButton.textContent = "回复中…";
+					root.querySelector("#send-status").textContent = "已发送，等待模型回复（推理模型可能要十几秒）";
+					root.querySelector("#send-inline").textContent = "正在等待模型…";
 					try {
 						const result = await api.post(`/api/chat/${current.id}/messages`, { content });
 						composer.value = "";
-						toast(`已回复（${result.elapsedMs}ms，${result.tokens} tokens）`, "success");
+						// 服务端把"空正文/被截断"的原因放在 note 里，必须让操作员看到
+						if (result.note) toast(result.note, "info", 9000);
+						else toast(`已回复（${result.elapsedMs}ms，${result.tokens} tokens）`, "success");
 						ctx.reload();
 					} catch (error) {
-						toast(error.message, "error");
+						// 关键：失败时也要刷新。服务端已经把用户消息和失败原因存进会话了，
+						// 不刷新的话界面上还是空的，看起来像"什么都没发生"。
+						toast(error.message, "error", 8000);
 						root.querySelector("#send-status").textContent = error.message;
+						root.querySelector("#send-inline").textContent = "失败，见会话里的错误记录";
+						setTimeout(() => ctx.reload(), 400);
 					} finally {
 						sendButton.disabled = false;
+						sendButton.textContent = "发送";
 					}
 				};
 				sendButton.addEventListener("click", send);

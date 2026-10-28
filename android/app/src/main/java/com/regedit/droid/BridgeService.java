@@ -27,11 +27,55 @@ public final class BridgeService extends Service implements DroidClient.Platform
 
     private DroidClient client;
     private String currentState = "未启动";
+    private android.os.PowerManager.WakeLock wakeLock;
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
+        acquireLocks();
+    }
+
+    /**
+     * 拿 CPU 与 Wi-Fi 的唤醒锁。
+     *
+     * 真机踩过：前台服务还在跑，但屏幕关掉 20 分钟后网络被 Doze 掐了，设备在控制台上
+     * 变成"离线"，此时抓包、截屏、拉文件全部失败。前台服务只保证进程不被回收，
+     * **不保证 CPU 和网络可用**——要持续在线必须自己拿锁。
+     * 代价是耗电，对一个专用调试设备是可接受的取舍。
+     */
+    private void acquireLocks() {
+        try {
+            android.os.PowerManager power = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            if (power != null && wakeLock == null) {
+                wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "regedit:bridge");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            }
+            android.net.wifi.WifiManager wifi =
+                    (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wifi != null && wifiLock == null) {
+                wifiLock = wifi.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "regedit:bridge");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
+        } catch (RuntimeException error) {
+            log("唤醒锁申请失败（不影响连接，但息屏后可能被系统挂起）：" + error);
+        }
+    }
+
+    private void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (RuntimeException ignored) {
+        }
+        wakeLock = null;
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        } catch (RuntimeException ignored) {
+        }
+        wifiLock = null;
     }
 
     @Override
@@ -93,6 +137,7 @@ public final class BridgeService extends Service implements DroidClient.Platform
         }
         currentState = "已停止";
         Bus.state("已停止", "");
+        releaseLocks();
         if (Build.VERSION.SDK_INT >= 24) {
             stopForeground(true);
         } else {
@@ -103,6 +148,7 @@ public final class BridgeService extends Service implements DroidClient.Platform
     @Override
     public void onDestroy() {
         stopBridge();
+        releaseLocks();
         super.onDestroy();
     }
 

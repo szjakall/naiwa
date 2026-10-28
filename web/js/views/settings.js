@@ -388,6 +388,11 @@ function modelPanel(llm) {
 								<td>
 									<div class="dim">${profile.name}</div>
 									<div class="tiny muted break">${profile.baseUrl}</div>
+									<div class="tiny muted">
+										上下文 ${profile.contextWindowK ? `${profile.contextWindowK}K` : "200K（默认）"}
+										· 输出 ${profile.maxTokens || 8192}
+										${profile.ratePerSecond || profile.ratePerMinute ? ` · 限速 ${profile.ratePerSecond || 0}/s ${profile.ratePerMinute || 0}/min` : ""}
+									</div>
 								</td>
 								<td class="nowrap mono tiny">${profile.modelId}</td>
 								<td class="nowrap">
@@ -450,10 +455,12 @@ function modelPanel(llm) {
 		<div class="page-section"></div>
 		${card({
 			title: "调用统计",
-			body: html`<div class="row small muted" style="gap:18px">
+			body: html`<div class="row small muted" style="gap:18px;flex-wrap:wrap">
 				<span>调用 ${llm.pool.calls} 次</span>
 				<span>失败 ${llm.pool.failures} 次</span>
-				<span>累计 ${llm.pool.tokens} tokens</span>
+				<span>输入 ${llm.pool.inputTokens ?? 0} tokens</span>
+				<span>输出 ${llm.pool.outputTokens ?? 0} tokens</span>
+				<span>合计 ${llm.pool.tokens} tokens</span>
 			</div>`,
 		})}
 	`;
@@ -719,6 +726,38 @@ function openProfileForm(profile, llm, ctx) {
 					<input data-model value="${profile?.modelId ?? ""}" placeholder="deepseek-chat" />
 				</label>
 			</div>
+			<div class="split-even" style="gap:12px">
+				<label class="field">
+					<span>上下文窗口（K tokens）</span>
+					<input data-context type="number" min="0" max="1000" value="${profile?.contextWindowK ?? ""}" placeholder="200" />
+					<span class="hint">压缩阈值。0/留空 = 默认 200K，上限 1000（1M）；填太大会让压缩不触发。</span>
+				</label>
+				<label class="field">
+					<span>最大输出（tokens）</span>
+					<input data-maxtokens type="number" min="0" max="32768" value="${profile?.maxTokens ?? ""}" placeholder="8192" />
+					<span class="hint">单次回复上限。推理型模型先花在这里，给小了正文会是空的。</span>
+				</label>
+			</div>
+			<div class="split-even" style="gap:12px">
+				<label class="field">
+					<span>每秒请求上限</span>
+					<input data-rps type="number" min="0" step="0.1" value="${profile?.ratePerSecond ?? ""}" placeholder="0 = 不限" />
+				</label>
+				<label class="field">
+					<span>每分钟请求上限</span>
+					<input data-rpm type="number" min="0" value="${profile?.ratePerMinute ?? ""}" placeholder="0 = 不限" />
+				</label>
+			</div>
+			<label class="field mb-0">
+				<span>推理强度（可选）</span>
+				<select data-effort>
+					<option value="" ${!profile?.reasoningEffort ? "selected" : ""}>不发送该字段</option>
+					${["low", "medium", "high"].map(
+						(level) => html`<option value="${level}" ${profile?.reasoningEffort === level ? "selected" : ""}>${level}</option>`,
+					)}
+				</select>
+				<span class="hint">不发送 = 兼容不支持该字段的模型；开启 = 先推理再作答。</span>
+			</label>
 		</div>
 		<div class="overlay-foot">
 			<button class="btn ghost" data-close>取消</button>
@@ -734,6 +773,11 @@ function openProfileForm(profile, llm, ctx) {
 				baseUrl: overlay.panel.querySelector("[data-base]").value.trim(),
 				apiKey: overlay.panel.querySelector("[data-key]").value,
 				modelId: overlay.panel.querySelector("[data-model]").value.trim(),
+				contextWindowK: overlay.panel.querySelector("[data-context]").value,
+				maxTokens: overlay.panel.querySelector("[data-maxtokens]").value,
+				ratePerSecond: overlay.panel.querySelector("[data-rps]").value,
+				ratePerMinute: overlay.panel.querySelector("[data-rpm]").value,
+				reasoningEffort: overlay.panel.querySelector("[data-effort]").value,
 			});
 			overlay.close();
 			toast("已保存", "success");

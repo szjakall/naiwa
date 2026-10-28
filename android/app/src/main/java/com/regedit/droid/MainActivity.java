@@ -156,6 +156,18 @@ public final class MainActivity extends Activity implements Bus.Listener {
         buttons.addView(stopButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(buttons);
 
+        // 息屏后系统会冻结网络，反连就断了。这里给一个直达系统设置的入口，
+        // 让操作员把本应用加进电池优化白名单（一次设置，长期有效）。
+        Button batteryButton = new Button(this);
+        batteryButton.setText("允许后台常驻（忽略电池优化）");
+        batteryButton.setTextSize(12);
+        batteryButton.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View view) {
+                requestIgnoreBatteryOptimization();
+            }
+        });
+        root.addView(batteryButton);
+
         stateView = new TextView(this);
         stateView.setTextSize(13);
         stateView.setTextColor(Color.parseColor("#3FE0A6"));
@@ -216,6 +228,37 @@ public final class MainActivity extends Activity implements Bus.Listener {
         startService(intent);
         stateView.setText("已停止");
         stateView.setTextColor(Color.parseColor("#8FA6BB"));
+    }
+
+    /**
+     * 引导用户把本应用加入电池优化白名单。
+     *
+     * Android 6+ 的 Doze 在息屏后会冻结 CPU 与网络：前台服务只能保住进程，
+     * 保不住网络（实测息屏 20 分钟设备就从控制台"离线"了，抓包自然失败）。
+     * 已白名单时直接提示，不再反复弹系统对话框。
+     */
+    private void requestIgnoreBatteryOptimization() {
+        android.os.PowerManager power = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        String pkg = getPackageName();
+        if (power != null && power.isIgnoringBatteryOptimizations(pkg)) {
+            Toast.makeText(this, "已经在电池优化白名单里，息屏也能保持连接", Toast.LENGTH_LONG).show();
+            appendLog("电池优化：已忽略（后台不受 Doze 限制）");
+            return;
+        }
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(android.net.Uri.parse("package:" + pkg));
+            startActivity(intent);
+            appendLog("已弹出电池优化设置，请选择「允许」——否则息屏后连接会被系统掐断");
+        } catch (RuntimeException error) {
+            // 部分 ROM 没有这个 Activity，退回总列表页
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                appendLog("已打开电池优化列表，请手动找到本应用并设为「不优化」");
+            } catch (RuntimeException ignored) {
+                Toast.makeText(this, "这台设备没有开放电池优化设置，请到系统设置里手动允许后台运行", Toast.LENGTH_LONG).show();
+            }
+        }
     }
 
     private void requestNotificationPermission() {
