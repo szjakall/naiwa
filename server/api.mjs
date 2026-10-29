@@ -114,13 +114,16 @@ import {
 } from "./notify.mjs";
 import {
 	archiveConversation,
+	abortTurn,
 	createConversation,
 	deleteConversation,
 	getConversation,
+	isTurnRunning,
 	listConversations,
 	patchConversation,
 	renameConversation,
 	sendMessage as sendChatMessage,
+	sendMessageStream,
 	setGoal,
 	stats as chatStats,
 } from "./chat.mjs";
@@ -1768,6 +1771,7 @@ on("GET", "/api/chat/:id", async ({ res, params }) => {
 	const task = conversation.taskId ? (store.state.tasks ?? []).find((entry) => entry.id === conversation.taskId) : null;
 	sendJson(res, 200, {
 		...conversation,
+		running: isTurnRunning(conversation.id),
 		// 会话页要在顶部画"项目条"、右下角画"设备选择"和"实时流量"，
 		// 一次带上，省三个串行请求。
 		project: task
@@ -1830,6 +1834,78 @@ on("PATCH", "/api/chat/:id", async ({ req, res, params }) => {
 on("DELETE", "/api/chat/:id", async ({ res, params }) => {
 	if (!deleteConversation(params.id)) return sendError(res, 404, "会话不存在");
 	sendJson(res, 200, { ok: true });
+});
+
+// ---- 对话：流式发送 / 停止 / 增量取消息
+//
+// 为什么单独一套流式接口：模型一轮要跑十几秒到一分钟，普通 JSON 接口在结束前
+// 什么都不返回，浏览器只能转圈；而且失败时要整页刷新才看得到结果。
+// 这里用 SSE 把"用户消息已入库 / 建了项目 / 第几轮 / 工具跑完 / 最终结果"逐步推回去。
+on("POST", "/api/chat/:id/messages/stream", async ({ req, res, params }) => {
+	const conversation = getConversation(params.id);
+	if (!conversation) return sendError(res, 404, "会话不存在");
+	const body = await readJson(req);
+	res.writeHead(200, {
+		"content-type": "text/event-stream; charset=utf-8",
+		"cache-control": "no-store",
+		connection: "keep-alive",
+		// nginx 反代默认缓冲 SSE，必须显式关掉，否则事件会攒到结束才一次性到达。
+		"x-accel-buffering": "no",
+	});
+	let closed = false;
+	const write = (type, payload) => {
+		if (closed || res.writableEnded) return;
+		try {
+			res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+		} catch {
+			closed = true;
+		}
+	};
+	const controller = new AbortController();
+	const heartbeat = setInterval(() => {
+		if (closed || res.writableEnded) return;
+		try {
+			res.write(": ping\n\n");
+		} catch {
+			closed = true;
+		}
+	}, 15000);
+	req.on("close", () => {
+		closed = true;
+		controller.abort();
+	});
+	try {
+		await sendMessageStream(params.id, body.content, {
+			temperature: body.temperature,
+			maxTokens: body.maxTokens,
+			abortController: controller,
+			onEvent: (event) => write(event.type ?? "status", event),
+		});
+	} catch (error) {
+		// 客户端主动断开时 AbortError 是预期分支，不再回写。
+		if (!closed) write("error", { message: error?.message ?? String(error) });
+	} finally {
+		clearInterval(heartbeat);
+		if (!res.writableEnded) res.end();
+	}
+});
+
+on("POST", "/api/chat/:id/abort", async ({ res, params }) => {
+	const result = abortTurn(params.id);
+	sendJson(res, result.ok ? 200 : 409, result);
+});
+
+on("GET", "/api/chat/:id/messages", async ({ res, params, query }) => {
+	const conversation = getConversation(params.id);
+	if (!conversation) return sendError(res, 404, "会话不存在");
+	const total = conversation.messages.length;
+	const since = Math.max(Number(query.get("since") ?? 0) || 0, 0);
+	sendJson(res, 200, {
+		messages: conversation.messages.slice(Math.min(since, total)),
+		total,
+		running: isTurnRunning(params.id),
+		updatedAt: conversation.updatedAt,
+	});
 });
 
 // ---- 公司 / 报告配置

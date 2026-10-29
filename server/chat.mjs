@@ -118,6 +118,20 @@ function conversations() {
 	return store.state.conversations;
 }
 
+/** 正在跑的轮次：会话 id → AbortController。「停止」按钮与客户端断开都靠它。 */
+const activeTurns = new Map();
+
+export function abortTurn(id) {
+	const controller = activeTurns.get(id);
+	if (!controller) return { ok: false, error: "这条会话没有正在进行的回复" };
+	controller.abort();
+	return { ok: true };
+}
+
+export function isTurnRunning(id) {
+	return activeTurns.has(id);
+}
+
 export function listConversations({ archived = false } = {}) {
 	return conversations()
 		.filter((c) => (archived ? c.archived === true : c.archived !== true))
@@ -351,6 +365,8 @@ export async function sendMessage(id, content, options = {}) {
 	if (!profile) {
 		throw new Error("没有可用的模型端点：请到「设置 → 模型」添加一个档案并激活");
 	}
+	// 进度事件：流式接口用它在工具刚跑完时就推给浏览器；非流式接口拿到的是 noop。
+	const emit = typeof options.onEvent === "function" ? options.onEvent : () => {};
 
 	conversation.messages.push({ role: "user", content: text.slice(0, MAX_CONTENT), at: new Date().toISOString() });
 	conversation.updatedAt = new Date().toISOString();
@@ -358,11 +374,21 @@ export async function sendMessage(id, content, options = {}) {
 	if (conversation.title === "新对话" && conversation.messages.length === 1) {
 		conversation.title = text.slice(0, 40);
 	}
+	store.save();
+	// 先把"用户消息已入库"推回去：前端可以立刻把它画出来，而不是等整轮跑完。
+	emit({ type: "user", message: conversation.messages[conversation.messages.length - 1], title: conversation.title });
 
 	const messages = [];
 	// 先看这句话里有没有目标：有就立刻建项目并开跑（和"原来那套"一样的开场行为）。
 	// 这一步放在调用模型之前，所以哪怕模型最终一句话没说，项目、流量、资产也已经落了。
 	const project = await ensureProject(conversation, text);
+	if (project?.task) {
+		emit({
+			type: "project",
+			project: { id: project.task.id, title: project.task.title, status: project.task.status, created: project.created },
+			note: project.note ?? "",
+		});
+	}
 	const projectBlock = project?.note ? `\n\n${project.note}` : "";
 	// 会话形态决定"目标长什么样"：站点会话看域名/URL，安卓会话看包名与设备。
 	const modeBlock =
@@ -422,7 +448,9 @@ export async function sendMessage(id, content, options = {}) {
 	messages.push(...kept);
 
 	const started = Date.now();
-	const controller = new AbortController();
+	// 流式接口会传进来一个可被客户端断开的 controller：浏览器一关，上游请求跟着断。
+	const controller = options.abortController ?? new AbortController();
+	activeTurns.set(conversation.id, controller);
 	const timer = setTimeout(() => controller.abort(), 180000);
 	const toolsEnabled = options.tools !== false;
 	let usageTotal = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 };
@@ -505,6 +533,9 @@ export async function sendMessage(id, content, options = {}) {
 				reasoningTokens: usageTotal.reasoningTokens + roundUsage.reasoningTokens,
 			};
 			if (!calls.length) break;
+			// 每轮开始就推一条状态：浏览器上能看到"第 2 轮 · 准备执行 8 个工具"，
+			// 而不是盯着一个不动的"回复中…"。
+			emit({ type: "round", round: round + 1, calls: calls.length, models: `${profile.modelId}` });
 
 			// 回填模型这一轮的"我要调工具"，否则下一轮上下文不合法
 			messages.push({ role: "assistant", content: choice.message?.content ?? "", tool_calls: calls });
@@ -524,6 +555,7 @@ export async function sendMessage(id, content, options = {}) {
 				if (executed.has(key)) {
 					const cached = executed.get(key);
 					toolTrace.push({ name, args, ok: cached.ok, summary: `（本轮已调用过，结果同上）${cached.summary}`, repeat: true });
+					emit({ type: "tool", name, args, ok: cached.ok, summary: `（已调用过，结果同上）${cached.summary}`, repeat: true });
 					messages.push({
 						role: "tool",
 						tool_call_id: call.id,
@@ -531,6 +563,9 @@ export async function sendMessage(id, content, options = {}) {
 					});
 					continue;
 				}
+				// 工具开跑前先推一条"正在执行"：DNS/WHOIS/设备命令可能要几秒，
+				// 这段时间界面必须有反馈。
+				emit({ type: "tool-start", name, args });
 				let result;
 				try {
 					// 设备优先级：会话绑定 > 项目绑定；都没有就让工具自己挑唯一在线设备。
@@ -550,6 +585,7 @@ export async function sendMessage(id, content, options = {}) {
 				const summary = String(result.summary ?? "").slice(0, 600);
 				executed.set(key, { ok: result.ok !== false, summary });
 				toolTrace.push({ name, args, ok: result.ok !== false, summary });
+				emit({ type: "tool", name, args, ok: result.ok !== false, summary });
 				messages.push({
 					role: "tool",
 					tool_call_id: call.id,
@@ -561,12 +597,14 @@ export async function sendMessage(id, content, options = {}) {
 				}
 			}
 			if (skipped > 0) {
+				emit({ type: "status", text: `本轮 ${calls.length} 个调用，只执行了前 ${roundCalls.length} 个` });
 				messages.push({
 					role: "system",
 					content: `本轮只执行了前 ${roundCalls.length} 个工具调用（另有 ${skipped} 个未执行）。请先基于已有结果推进，不要一次给太多调用。`,
 				});
 			}
 			if (budgetHit) {
+				emit({ type: "status", text: "工具额度用尽，要求模型直接给结论" });
 				messages.push({
 					role: "system",
 					content: "工具调用额度已用尽。现在**不要再调用工具**，直接用现有结果给出结论：已确认的事实、仍未验证的部分、下一步建议。",
@@ -588,6 +626,7 @@ export async function sendMessage(id, content, options = {}) {
 		const lastCalls = lastChoice.message?.tool_calls ?? [];
 		const lastContent = String(lastChoice.message?.content ?? "").trim();
 		if (toolsActive && (lastCalls.length > 0 || !lastContent)) {
+			emit({ type: "status", text: "收尾：要求模型给结论（不再调用工具）" });
 			messages.push({
 				role: "system",
 				content:
@@ -689,6 +728,7 @@ export async function sendMessage(id, content, options = {}) {
 		throw error;
 	} finally {
 		clearTimeout(timer);
+		activeTurns.delete(conversation.id);
 	}
 }
 
@@ -707,6 +747,23 @@ function summarizeToolTrace(trace, budgetHit) {
 	}
 	lines.push("", "下一步：让我「把结果整理成结论并生成报告」，或直接看「流量」「漏洞」页。");
 	return lines.join("\n");
+}
+
+/**
+ * 流式版本：与 sendMessage 共用同一套逻辑，区别只是把进度通过 onEvent 推出去。
+ * 浏览器拿到的是"用户消息已入库 / 建了项目 / 第几轮 / 某个工具跑完 / 收尾 / 最终结果"，
+ * 所以不需要等整轮跑完才看到东西，也不需要切页面刷新。
+ */
+export async function sendMessageStream(id, content, options = {}) {
+	const emit = typeof options.onEvent === "function" ? options.onEvent : () => {};
+	try {
+		const result = await sendMessage(id, content, { ...options, onEvent: emit });
+		emit({ type: "done", result });
+		return result;
+	} catch (error) {
+		emit({ type: "error", message: error?.message ?? String(error) });
+		throw error;
+	}
 }
 
 export function stats() {
