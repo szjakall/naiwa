@@ -49,8 +49,8 @@ echo "[2/6] 链接清单与资源（targetSdk $TARGET_SDK）"
     --java "$OUT/gen" \
     --min-sdk-version "$MIN_SDK" \
     --target-sdk-version "$TARGET_SDK" \
-    --version-code 2 \
-    --version-name 1.1.0 \
+    --version-code 4 \
+    --version-name 1.3.0 \
     "$OUT/res"/*.flat
 
 echo "[3/6] 编译 Java"

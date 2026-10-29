@@ -22,7 +22,7 @@ export const SETTINGS_FILE = join(DATA_DIR, "settings.json");
 export const STATE_FILE = join(DATA_DIR, "state.json");
 
 /** 控制台版本，界面上会显示，也是静态资源缓存的版本号。 */
-export const VERSION = "1.1.0";
+export const VERSION = "1.3.0";
 
 export function ensureDirs() {
 	for (const dir of [
