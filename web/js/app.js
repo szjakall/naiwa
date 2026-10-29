@@ -262,6 +262,9 @@ function navBadge(id) {
 	if (id === "findings" && app.stats.findings) return app.stats.findings;
 	if (id === "android" && app.stats.online) return app.stats.online;
 	if (id === "gates" && app.stats.pending) return app.stats.pending;
+	if (id === "tasks" && app.stats.running) return app.stats.running;
+	// 流量徽标：有包就亮，数量封顶 999（四位数会把侧栏挤歪）。
+	if (id === "traffic" && app.stats.traffic) return app.stats.traffic > 999 ? "999+" : app.stats.traffic;
 	return null;
 }
 
@@ -385,10 +388,15 @@ const ctx = {
 
 async function route(force = false) {
 	const hash = location.hash.replace(/^#\/?/, "");
-	const [id, ...rest] = hash.split("/");
+	// 支持 `#/assets?company=co1`：哈希路由里带查询串，视图用 ctx.query 读。
+	// 之前不分 ? 的话，`assets?company=co1` 会被当成一个不存在的视图名，直接掉回总览。
+	const [pathPart, queryPart] = hash.split("?");
+	const [id, ...rest] = pathPart.split("/");
+	const query = new URLSearchParams(queryPart ?? "");
 	const viewId = VIEWS[id] ? id : "dashboard";
 	const param = rest.join("/");
-	if (!force && app.view === viewId && app.lastParam === param) return;
+	const queryKey = query.toString();
+	if (!force && app.view === viewId && app.lastParam === param && app.lastQuery === queryKey) return;
 
 	if (app.dispose) {
 		try {
@@ -400,6 +408,7 @@ async function route(force = false) {
 	}
 	app.view = viewId;
 	app.lastParam = param;
+	app.lastQuery = queryKey;
 
 	document.querySelectorAll("[data-nav]").forEach((node) => {
 		node.classList.toggle("active", node.dataset.nav === viewId);
@@ -410,7 +419,7 @@ async function route(force = false) {
 	setHeader(module.title ?? "", module.subtitle ?? "", null);
 	container.innerHTML = "";
 	try {
-		const dispose = await module.render(container, { ...ctx, param });
+		const dispose = await module.render(container, { ...ctx, param, query });
 		app.dispose = typeof dispose === "function" ? dispose : null;
 	} catch (error) {
 		container.innerHTML = "";

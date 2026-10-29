@@ -8,9 +8,13 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readSettings } from "./config.mjs";
 import { store } from "./store.mjs";
 import { contextWindowOf, normalizeUsage, profileForRole, recordLlmCall } from "./agents.mjs";
 import { CHAT_TOOLS, runChatTool } from "./chat-tools.mjs";
+import { guard } from "./gatekeeper.mjs";
+import { gateway } from "./droid.mjs";
+import { createTask, normalizeTarget } from "./recon.mjs";
 
 const MAX_MESSAGES = 200;
 const MAX_CONTENT = 12000;
@@ -39,6 +43,14 @@ const AGENT_PROMPT = `你是 regedit 安全评估控制台的"主 agent"，是�
    人工审批模式下会排队，**排队不是失败**，如实说明审批单号即可）；
    想要交付物 → 调 generate_report，可只选中的漏洞。
 
+4. **项目**：每次对话会自动绑定一个评估项目（任务），从你这句话里识别到的目标已经
+   建好并开始跑。之后的侦察、资产、发现、流量都记在这个项目下——不要另起新任务，
+   要加目标就调 create_recon_task，它会把目标并进当前项目。
+
+5. **设备**：需要看手机时先 list_devices 确认在线设备，再 device_exec / device_screencap /
+   device_logcat / device_pull / device_packages。设备命令受守门约束（人工审批模式下排队，
+   排队不是失败）。命令要一条一条来，别把整段脚本塞进一次调用。只读排查优先。
+
 通用要求：
 - 你有工具，能真查。需要 WHOIS、DNS、项目数据时直接调用，**不要**教用户去敲命令、
   也不要声称自己无法联网。
@@ -46,23 +58,51 @@ const AGENT_PROMPT = `你是 regedit 安全评估控制台的"主 agent"，是�
 - 用人话简洁回复"做了什么、得到什么"，不要罗列一堆过程。`;
 
 /** 把项目现状压缩成一段上下文喂给模型，省得它每轮都先调一次工具。 */
-function projectContext() {
+function projectContext(conversation) {
 	const tasks = store.state.tasks ?? [];
 	const assets = store.state.assets ?? [];
 	const findings = (store.state.findings ?? []).filter((f) => f.status !== "closed");
 	const bySeverity = {};
 	for (const f of findings) bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+	// 绑定了项目就按项目切片：模型关心的是"这个项目现在什么样"，
+	// 全局数字会把别的客户的数据混进来。
+	const task = conversation?.taskId ? tasks.find((entry) => entry.id === conversation.taskId) : null;
+	const scopedFindings = task ? findings.filter((f) => f.taskId === task.id) : findings;
+	const scopedAssets = task ? assets.filter((a) => a.taskId === task.id || a.lastTaskId === task.id) : assets;
+	const scopedTraffic = task ? (store.state.traffic ?? []).filter((t) => t.taskId === task.id) : [];
 	const lines = [
 		"当前项目概况：",
+		task
+			? `- 当前项目：${task.id}「${task.title}」${task.status}${task.stage ? ` / ${task.stage}` : ""}（目标 ${(task.targets ?? []).length} 个）`
+			: "- 当前还没有绑定项目（这次对话里识别到目标会自动建一个）",
 		`- 任务 ${tasks.length} 个（运行中 ${tasks.filter((t) => t.status === "running").length}）`,
-		`- 资产 ${assets.length} 个`,
-		`- 待处理漏洞 ${findings.length} 条${findings.length ? `（${Object.entries(bySeverity).map(([k, v]) => `${k} ${v}`).join(" / ")}）` : ""}`,
+		`- 资产 ${scopedAssets.length} 个`,
+		`- 待处理漏洞 ${scopedFindings.length} 条${scopedFindings.length ? `（${Object.entries(bySeverity).map(([k, v]) => `${k} ${v}`).join(" / ")}）` : ""}`,
 		`- 已有报告 ${(store.state.reports ?? []).length} 份`,
 	];
+	if (task) lines.push(`- 本项目流量 ${scopedTraffic.length} 条（最近：${scopedTraffic.slice(-3).map((t) => `${t.method} ${t.url} → ${t.status}`).join("；") || "暂无"}）`);
 	if (tasks.length) {
 		lines.push("最近任务：" + tasks.slice(0, 5).map((t) => `${t.id}「${t.title}」${t.status}`).join("；"));
 	}
+	const devices = gatewayDevices();
+	if (devices.length) {
+		lines.push(
+			"安卓设备：" +
+				devices
+					.map((d) => `${d.name}（${d.model ?? "?"}/${d.liveness}${conversation?.deviceId && d.id === conversation.deviceId ? "/本会话绑定" : ""}）`)
+					.join("、"),
+		);
+	}
 	return lines.join("\n");
+}
+
+/** 设备列表：带在线/冻结状态的运行时视图，而不是注册表里的静态记录。 */
+function gatewayDevices() {
+	try {
+		return gateway.devices();
+	} catch {
+		return [];
+	}
 }
 
 function conversations() {
@@ -79,6 +119,8 @@ export function listConversations({ archived = false } = {}) {
 			at: c.at,
 			updatedAt: c.updatedAt,
 			messageCount: c.messages.length,
+			taskId: c.taskId ?? null,
+			deviceId: c.deviceId ?? null,
 			preview: c.messages.length ? String(c.messages[c.messages.length - 1].content).slice(0, 80) : "",
 		}))
 		.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
@@ -94,6 +136,12 @@ export function createConversation(title = "新对话", systemPrompt = "") {
 		title: String(title || "新对话").slice(0, 120),
 		systemPrompt: String(systemPrompt ?? "").slice(0, 8000),
 		goal: "",
+		// 项目（任务）绑定：对话不是漂浮的聊天框，它长在一个评估项目上。
+		taskId: null,
+		// 设备绑定：这台会话默认操作哪台安卓设备（多设备时必须选）。
+		deviceId: null,
+		// 公司归属：决定这个项目/资产/发现交付给谁。
+		companyId: null,
 		messages: [],
 		at: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
@@ -119,6 +167,111 @@ export function setGoal(id, goal) {
 	conversation.goal = String(goal ?? "").slice(0, 600);
 	store.save();
 	return conversation;
+}
+
+/** 绑定项目 / 设备 / 公司：一次改一个，返回更新后的会话。 */
+export function patchConversation(id, patch = {}) {
+	const conversation = getConversation(id);
+	if (!conversation) return null;
+	if (patch.taskId !== undefined) {
+		const taskId = String(patch.taskId ?? "").trim();
+		if (taskId && !(store.state.tasks ?? []).some((task) => task.id === taskId)) return { error: "项目（任务）不存在" };
+		conversation.taskId = taskId || null;
+	}
+	if (patch.deviceId !== undefined) conversation.deviceId = String(patch.deviceId ?? "").trim() || null;
+	if (patch.companyId !== undefined) {
+		const companyId = String(patch.companyId ?? "").trim();
+		if (companyId && !(store.state.companies ?? []).some((company) => company.id === companyId)) return { error: "公司不存在" };
+		conversation.companyId = companyId || null;
+	}
+	conversation.updatedAt = new Date().toISOString();
+	store.save();
+	return conversation;
+}
+
+// ---------------------------------------------------------------- 自动建项目
+
+/**
+ * 从一句话里认出"要测哪些目标"。
+ *
+ * 保守做法：TLD 白名单 + 排除邮箱 + 去重 + 最多 8 个。宁可漏（模型还能显式调
+ * create_recon_task），也不要把一段散文里的每个单词都当域名建出十个空项目。
+ */
+const TLD_ALLOW = new Set(
+	"com net org cn io me dev app co ai info biz cc tv xyz top site online tech cloud shop vip edu gov mil int eu us uk jp kr hk tw sg ru de fr nl ca au".split(" "),
+);
+
+export function detectTargets(text) {
+	const raw = String(text ?? "");
+	const out = [];
+	const seen = new Set();
+	const push = (token) => {
+		const cleaned = String(token ?? "").replace(/[.,;:]+$/, "");
+		if (!cleaned || seen.has(cleaned.toLowerCase())) return;
+		if (!normalizeTarget(cleaned)) return;
+		seen.add(cleaned.toLowerCase());
+		out.push(cleaned);
+	};
+	// 1) IPv4（可带端口 / 路径 / 协议）：渗透目标经常只有 IP，不能只认域名。
+	for (const match of raw.match(/(?:https?:\/\/)?\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?:\/[^\s，。；、）)\]】"'<>]*)?/g) ?? []) {
+		push(match);
+	}
+	// 2) 域名 / URL：TLD 白名单挡掉 "Android.Manifest" 这类误判。
+	const found = raw.match(/(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){1,4}[a-z]{2,24}(?::\d{1,5})?(?:\/[^\s，。；、）)\]】"'<>]*)?/gi) ?? [];
+	for (const token of found) {
+		// 邮箱里的 @ 前后不是目标：a@b.com 会被上面匹配到 b.com
+		const at = raw.indexOf(token);
+		if (at > 0 && raw[at - 1] === "@") continue;
+		const host = token.replace(/^https?:\/\//i, "").split(/[/:?#]/)[0].toLowerCase();
+		if (!TLD_ALLOW.has(host.split(".").pop())) continue;
+		push(token);
+	}
+	return out.slice(0, 8);
+}
+
+function titleFor(text, target) {
+	const firstLine = String(text ?? "").trim().split(/\r?\n/)[0] ?? "";
+	const clean = firstLine.replace(/\s+/g, " ").slice(0, 40);
+	return clean || `${target} 评估`;
+}
+
+/**
+ * 对话开场自动建项目并开跑。
+ *
+ * 这就是"跟原来项目一样"的行为：说一句"对 example.com 做评估"，会话立刻有一个
+ * 项目（任务）在跑，资产与流量随即出现；而不是要用户再点一次「任务 → 新建」。
+ * 关掉它的开关在设置里（chat.autoProject）。
+ */
+async function ensureProject(conversation, text) {
+	if (readSettings().chat?.autoProject === false) return null;
+	const bound = conversation.taskId ? (store.state.tasks ?? []).find((task) => task.id === conversation.taskId) : null;
+	if (bound) return { task: bound, created: false, note: "" };
+	const targets = detectTargets(text);
+	if (!targets.length) return null;
+	const task = createTask({
+		title: titleFor(text, targets[0]),
+		scope: targets.join("\n"),
+		companyId: conversation.companyId ?? null,
+		conversationId: conversation.id,
+	});
+	if (!task.targets.length) return null;
+	conversation.taskId = task.id;
+	store.save();
+	const gate = await guard({
+		scope: "recon",
+		source: "对话 Agent · 自动建项目",
+		target: task.title,
+		command: `对以下目标发起只读 GET 侦察：\n${task.scope.join("\n")}`,
+		action: { kind: "reconTask", taskId: task.id },
+	});
+	const note =
+		gate.kind === "pending"
+			? `已自动创建项目 ${task.id}「${task.title}」（${task.targets.length} 个目标），当前是人工审批模式，需在「守门」页批准后开跑（审批单 ${gate.approvalId}）。`
+			: gate.kind === "block"
+				? `已自动创建项目 ${task.id}「${task.title}」，但守门员拦下了执行：${gate.reason || "未给出理由"}。`
+				: `已自动创建项目 ${task.id}「${task.title}」并开始侦察（${task.targets.length} 个目标）。`;
+	store.log("info", note);
+	return { task, created: true, note, gate: gate.kind };
 }
 
 export function archiveConversation(id, archived = true) {
@@ -164,12 +317,16 @@ export async function sendMessage(id, content, options = {}) {
 	}
 
 	const messages = [];
+	// 先看这句话里有没有目标：有就立刻建项目并开跑（和"原来那套"一样的开场行为）。
+	// 这一步放在调用模型之前，所以哪怕模型最终一句话没说，项目、流量、资产也已经落了。
+	const project = await ensureProject(conversation, text);
+	const projectBlock = project?.note ? `\n\n${project.note}` : "";
 	// 会话目标对应原版的 {{.Goal}}：注入后模型才知道"这次到底要交付什么"，
 	// 否则它会漫无目的地查一圈。
 	const goalBlock = conversation.goal ? `\n\n当前任务目标：${conversation.goal}` : "";
 	messages.push({
 		role: "system",
-		content: `${AGENT_PROMPT}${goalBlock}\n\n${conversation.systemPrompt ? `补充要求：${conversation.systemPrompt}\n\n` : ""}${projectContext()}`,
+		content: `${AGENT_PROMPT}${goalBlock}${projectBlock}\n\n${conversation.systemPrompt ? `补充要求：${conversation.systemPrompt}\n\n` : ""}${projectContext(conversation)}`,
 	});
 
 	// 输入侧预算：上下文窗口减去留给输出的部分，超出就从最旧的一轮开始丢。
@@ -298,7 +455,14 @@ export async function sendMessage(id, content, options = {}) {
 				}
 				let result;
 				try {
-					result = await runChatTool(call.function?.name, args);
+					// 设备优先级：会话绑定 > 项目绑定；都没有就让工具自己挑唯一在线设备。
+					const projectTask = conversation.taskId ? (store.state.tasks ?? []).find((task) => task.id === conversation.taskId) : null;
+					result = await runChatTool(call.function?.name, args, {
+						conversationId: conversation.id,
+						taskId: conversation.taskId ?? null,
+						companyId: conversation.companyId ?? null,
+						deviceId: conversation.deviceId ?? projectTask?.deviceId ?? null,
+					});
 				} catch (error) {
 					result = { ok: false, summary: `工具执行失败：${error.message}` };
 				}
@@ -356,6 +520,8 @@ export async function sendMessage(id, content, options = {}) {
 			content: reply.slice(0, MAX_CONTENT),
 			at: new Date().toISOString(),
 			model: profile.modelId,
+			...(conversation.taskId ? { projectId: conversation.taskId } : {}),
+			...(project?.note ? { projectNote: project.note } : {}),
 			// 输入 / 输出分开记：只存总量分不清"上下文太长"还是"模型啰嗦"
 			inputTokens: usage.inputTokens,
 			outputTokens: usage.outputTokens,
@@ -385,8 +551,9 @@ export async function sendMessage(id, content, options = {}) {
 			contextWindow: window,
 			trimmed,
 			tools: toolTrace,
+			...(project?.task ? { project: { id: project.task.id, title: project.task.title, status: project.task.status, created: project.created } } : {}),
 			...(note ? { note } : {}),
-			conversation: { id: conversation.id, title: conversation.title },
+			conversation: { id: conversation.id, title: conversation.title, taskId: conversation.taskId ?? null },
 		};
 	} catch (error) {
 		if (error.name === "AbortError") throw new Error("模型调用超时（180s）");

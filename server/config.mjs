@@ -22,7 +22,7 @@ export const SETTINGS_FILE = join(DATA_DIR, "settings.json");
 export const STATE_FILE = join(DATA_DIR, "state.json");
 
 /** 控制台版本，界面上会显示，也是静态资源缓存的版本号。 */
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 
 export function ensureDirs() {
 	for (const dir of [
@@ -83,6 +83,13 @@ export function defaultSettings() {
 			listenHost: "0.0.0.0",
 			listenPort: 9944,
 			autostart: true,
+		},
+		/**
+		 * 对话行为。autoProject：说一句带目标的话，会话自动建项目（任务）并开跑，
+		 * 和"原来那套"的开场一致；不想让它自动跑就关掉，模型仍可显式 create_recon_task。
+		 */
+		chat: {
+			autoProject: true,
 		},
 		skills: {
 			dirs: ["skills"],

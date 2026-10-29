@@ -2,7 +2,7 @@
 
 对着控制台的**安卓反连 APK**：装在测试机上后主动拨回 `regedit` 控制台，服务器不需要对手机开放任何端口。
 
-- **minSdk 21（Android 5.0）／targetSdk 36（Android 16）**，已在 **真机 Xiaomi 2407FRK8EC / Android 16 / arm64 / Magisk root** 上实测 22 项通过
+- **minSdk 21（Android 5.0）／targetSdk 36（Android 16）**，已在 **真机 Xiaomi / Android 16 / arm64 / Magisk root** 上实测 22 项通过
 - 纯 Java、**零第三方依赖**（没有 OkHttp / AndroidX），APK 约 41KB
 - 构建脚本只用 Android SDK 自带工具（aapt2 + javac + d8 + apksigner），**不需要 Gradle**
 
@@ -115,7 +115,7 @@ adb reverse tcp:9958 tcp:9958     # 手机 127.0.0.1:9958 → 本机 9958
 ## 实测记录（真机 Android 16 + root）
 
 ```
-设备反连并出现在控制台      Xiaomi 2407FRK8EC · Android 16 · root=true
+设备反连并出现在控制台      Xiaomi · Android 16 · root=true
 exec（普通/root）           uid=10323… / id -u → 0
 packages                    410 个包
 logcat                      51 行

@@ -16,6 +16,7 @@ const TABS = [
 	{ id: "model", label: "模型" },
 	{ id: "mcp", label: "MCP" },
 	{ id: "report", label: "报告" },
+	{ id: "chat", label: "对话" },
 	{ id: "skills", label: "技能" },
 	{ id: "account", label: "账号" },
 	{ id: "system", label: "系统" },
@@ -68,6 +69,7 @@ export default {
 			else if (tab === "mcp") body = mcpPanel(mcp);
 			else if (tab === "report") body = reportPanel(reportSettings, templates);
 			else if (tab === "skills") body = skillsPanel(settings);
+			else if (tab === "chat") body = chatPanel(settings);
 			else if (tab === "account") body = accountPanel(gate);
 			else body = systemPanel(system, gate);
 
@@ -286,7 +288,7 @@ export default {
 		actions.querySelector("#save").addEventListener("click", async () => {
 			actions.querySelector("#save").disabled = true;
 			try {
-				if (["site", "engine", "skills"].includes(tab)) {
+				if (["site", "engine", "skills", "chat"].includes(tab)) {
 					const result = await api.put("/api/settings", buildPatch(root));
 					settings = result.settings;
 					toast("设置已保存", "success");
@@ -567,6 +569,39 @@ function reportPanel(settings, templates) {
 			tight: true,
 		})}
 	`;
+}
+
+/**
+ * 对话行为。核心开关是"自动建项目"：说一句带目标的话，会话立刻有一个项目在跑。
+ * 关掉之后对话仍然能聊，只是不再自动发侦察——适合只想问问题、不想动目标的场合。
+ */
+function chatPanel(settings) {
+	const auto = settings.chat?.autoProject !== false;
+	return card({
+		title: "对话与项目",
+		sub: "会话 ↔ 项目（任务）绑定",
+		body: html`
+			<label class="checkbox">
+				<input type="checkbox" data-k="chat.autoProject" ${auto ? "checked" : ""} />
+				<span>对话里识别到目标时，自动创建项目并开始侦察</span>
+			</label>
+			<div class="hint-box mt-12">
+				${raw(icon("alert", { size: 16 }))}
+				<span>
+					开启后：第一句里出现域名/IP/URL，后台立刻建一个任务并把目标并进去，随后按守门策略开跑
+					（人工审批模式下会先排队）。同一个会话后续提到的新目标会并进同一个项目，不会越聊越多任务。
+					关闭后模型仍可显式调用 create_recon_task。
+				</span>
+			</div>
+			<div class="hint-box mt-12">
+				${raw(icon("traffic", { size: 16 }))}
+				<span>
+					项目的资产、发现与流量都会带上归属（公司 / 项目 / 会话）：在「资产」「流量」页可以按项目筛，
+					在「公司」页展开即可看到它名下的项目与资产。
+				</span>
+			</div>
+		`,
+	});
 }
 
 function skillsPanel(settings) {

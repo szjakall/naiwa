@@ -42,8 +42,11 @@ export default {
 async function renderList(root, ctx) {
 	mount(root, loading());
 	let tasks = [];
+	let companies = [];
 	try {
-		tasks = await api.get("/api/tasks");
+		const [taskList, companyList] = await Promise.all([api.get("/api/tasks"), api.get("/api/companies")]);
+		tasks = Array.isArray(taskList) ? taskList : [];
+		companies = Array.isArray(companyList?.items) ? companyList.items : [];
 	} catch (error) {
 		mount(root, inlineError(error.message));
 		return null;
@@ -53,11 +56,17 @@ async function renderList(root, ctx) {
 		${raw(icon("plus", { size: 15 }))}新建任务
 	</button>`);
 	ctx.setHeader("任务", `共 ${tasks.length} 个任务`, actions);
-	actions.querySelector("#new-task").addEventListener("click", () => openCreateDialog(ctx));
+	actions.querySelector("#new-task").addEventListener("click", () => openCreateDialog(ctx, companies));
 
+	// `#/tasks?companyId=co1`：从公司页点进来就只看这家客户的项目。
+	let companyId = ctx.query?.get("companyId") ?? "";
 	let filter = "all";
+	const companyName = (id) => companies.find((company) => company.id === id)?.name ?? "";
 	const paint = () => {
-		const visible = tasks.filter((task) => filter === "all" || task.status === filter);
+		const visible = tasks.filter((task) => {
+			if (companyId && task.companyId !== companyId) return false;
+			return filter === "all" || task.status === filter;
+		});
 		const body = visible.length
 			? html`<div class="table-wrap">
 					<table>
@@ -65,8 +74,11 @@ async function renderList(root, ctx) {
 							<tr>
 								<th>任务</th>
 								<th class="nowrap">状态</th>
+								<th class="nowrap">公司</th>
 								<th class="nowrap">目标</th>
+								<th class="nowrap">资产</th>
 								<th class="nowrap">发现</th>
+								<th class="nowrap">流量</th>
 								<th class="nowrap">创建时间</th>
 								<th class="nowrap"></th>
 							</tr>
@@ -79,8 +91,17 @@ async function renderList(root, ctx) {
 										<div class="tiny muted break">${(task.scope ?? []).join("，") || "无目标"}</div>
 									</td>
 									<td>${statusChip(task.status)}</td>
+									<td class="nowrap tiny">
+										${task.companyId
+											? html`<a class="link" href="#/tasks?companyId=${task.companyId}">${companyName(task.companyId) || task.companyId}</a>`
+											: html`<span class="muted">未归属</span>`}
+									</td>
 									<td class="mono">${(task.targets ?? []).length}</td>
+									<td class="mono">${task.assets ?? 0}</td>
 									<td class="mono">${task.findings ?? 0}</td>
+									<td class="mono">
+										<a class="link" href="#/traffic?taskId=${task.id}">${task.traffic ?? 0}</a>
+									</td>
 									<td class="nowrap tiny muted">${relTime(task.createdAt)}</td>
 									<td class="nowrap center">
 										<button class="btn ghost small" data-open="${task.id}">详情</button>
@@ -105,7 +126,7 @@ async function renderList(root, ctx) {
 		mount(
 			root,
 			html`
-				<div class="page-section">
+				<div class="page-section row" style="gap:10px;flex-wrap:wrap">
 					<div class="tabs">
 						${STATUS_FILTERS.map(
 							(item) =>
@@ -115,6 +136,15 @@ async function renderList(root, ctx) {
 								</button>`,
 						)}
 					</div>
+					<select id="company-filter" style="max-width:220px">
+						<option value="">全部公司</option>
+						${companies.map(
+							(company) =>
+								html`<option value="${company.id}" ${company.id === companyId ? "selected" : ""}>${company.name}</option>`,
+						)}
+					</select>
+					<div class="spacer"></div>
+					<span class="tiny muted">${visible.length} / ${tasks.length}</span>
 				</div>
 				${card({ body, tight: true })}
 			`,
@@ -126,6 +156,11 @@ async function renderList(root, ctx) {
 				paint();
 			}),
 		);
+		root.querySelector("#company-filter")?.addEventListener("change", (event) => {
+			companyId = event.target.value;
+			ctx.go(`#/tasks${companyId ? `?companyId=${companyId}` : ""}`);
+			paint();
+		});
 		root.querySelectorAll("[data-open]").forEach((node) =>
 			node.addEventListener("click", () => ctx.go(`#/tasks/${node.dataset.open}`)),
 		);
@@ -176,13 +211,20 @@ async function renderList(root, ctx) {
 	return null;
 }
 
-function openCreateDialog(ctx) {
+function openCreateDialog(ctx, companies = []) {
 	const overlay = openOverlay(html`
-		<div class="overlay-head"><h3>新建评估任务</h3></div>
+		<div class="overlay-head"><h3>新建评估项目</h3></div>
 		<div class="overlay-body">
 			<label class="field">
-				<span>任务名称</span>
+				<span>项目名称</span>
 				<input data-title placeholder="例如：官网门户 授权评估" />
+			</label>
+			<label class="field">
+				<span>归属公司（可选）</span>
+				<select data-company>
+					<option value="">未归属</option>
+					${companies.map((company) => html`<option value="${company.id}">${company.name}</option>`)}
+				</select>
 			</label>
 			<label class="field">
 				<span>目标范围</span>
@@ -204,13 +246,14 @@ function openCreateDialog(ctx) {
 	const submit = async () => {
 		const title = overlay.panel.querySelector("[data-title]").value.trim();
 		const scope = overlay.panel.querySelector("[data-scope]").value;
+		const companyId = overlay.panel.querySelector("[data-company]").value;
 		const autorun = overlay.panel.querySelector("[data-autorun]").checked;
 		if (!scope.trim()) return toast("至少填一个目标", "error");
 		const button = overlay.panel.querySelector("[data-create]");
 		button.disabled = true;
 		button.textContent = "创建中…";
 		try {
-			const result = await api.post("/api/tasks", { title, scope, autorun });
+			const result = await api.post("/api/tasks", { title, scope, companyId, autorun });
 			overlay.close();
 			if (result.pending) toast("任务已创建，已进入审批队列：到「守门」页批准后开始执行", "info", 6000);
 			else if (result.blocked) toast(result.error ?? "守门员拦截了这次任务", "error", 6000);
@@ -233,6 +276,18 @@ function openCreateDialog(ctx) {
 
 async function renderDetail(root, ctx, id) {
 	mount(root, loading());
+
+	// 项目的设备绑定：对话里没绑会话时，设备工具就用这台。
+	let devices = [];
+	let companies = [];
+	try {
+		const [state, companyList] = await Promise.all([api.get("/api/android/state"), api.get("/api/companies")]);
+		devices = Array.isArray(state?.devices) ? state.devices : [];
+		companies = Array.isArray(companyList?.items) ? companyList.items : [];
+	} catch {
+		devices = [];
+		companies = [];
+	}
 
 	const reloadActions = (task) => {
 		const node = toNode(html`<div class="row">
@@ -279,6 +334,8 @@ async function renderDetail(root, ctx, id) {
 
 	const paint = (data) => {
 		const { task, findings, traffic } = data;
+		const assets = data.assets ?? [];
+		const conversation = data.conversation ?? null;
 		if (!timer) reloadActions(task);
 
 		const counts = findings.reduce((acc, finding) => {
@@ -299,6 +356,33 @@ async function renderDetail(root, ctx, id) {
 		mount(
 			root,
 			html`
+				<div class="page-section row small muted" style="gap:14px;flex-wrap:wrap">
+					<span class="row" style="gap:6px">
+						公司
+						<select id="task-company" style="max-width:200px">
+							<option value="">未归属</option>
+							${companies.map(
+								(entry) =>
+									html`<option value="${entry.id}" ${entry.id === task.companyId ? "selected" : ""}>${entry.name}</option>`,
+							)}
+						</select>
+					</span>
+					<span>来源 ${conversation ? html`<a class="link" href="#/chat/${conversation.id}">${conversation.title}</a>` : "控制台"}</span>
+					<span>${(task.scope ?? []).length} 个目标</span>
+					<a class="link" href="#/traffic?taskId=${task.id}">本项目流量 ${traffic.length} 条</a>
+					<span class="row" style="gap:6px">
+						设备
+						<select id="task-device" style="max-width:220px">
+							<option value="">未绑定</option>
+							${devices.map(
+								(device) =>
+									html`<option value="${device.id}" ${device.id === task.deviceId ? "selected" : ""}>
+										${device.name} · ${device.liveness}
+									</option>`,
+							)}
+						</select>
+					</span>
+				</div>
 				<div class="grid grid-4 page-section">
 					${statCard({ label: "状态", value: task.status, foot: task.stage ?? "", iconName: "tasks" })}
 					${statCard({ label: "请求数", value: task.stats?.requests ?? 0, foot: "只读 GET", iconName: "traffic" })}
@@ -322,9 +406,29 @@ async function renderDetail(root, ctx, id) {
 						${card({
 							title: "风险分布",
 							body: html`<div class="row small muted" style="justify-content:space-between">
-								<span>共 ${findings.length} 条</span><span>${task.stats?.assets ?? 0} 个资产</span>
+								<span>共 ${findings.length} 条</span><span>${assets.length} 个资产</span>
 							</div>
 							<div class="mt-12">${severityBar(counts)}</div>`,
+						})}
+						${card({
+							title: "项目资产",
+							sub: `${assets.length} 个`,
+							actions: html`<a class="btn ghost small" href="#/assets?taskId=${task.id}">全部</a>`,
+							body: assets.length
+								? html`<div class="table-wrap" style="max-height:220px">
+										<table>
+											<tbody>
+												${assets.slice(0, 14).map(
+													(asset) => html`<tr>
+														<td class="nowrap"><span class="chip chip-muted">${asset.type}</span></td>
+														<td class="break tiny mono">${asset.value}</td>
+													</tr>`,
+												)}
+											</tbody>
+										</table>
+									</div>`
+								: html`<div class="muted small">还没有资产。</div>`,
+							tight: true,
 						})}
 						${card({
 							title: "命中发现",
@@ -380,6 +484,27 @@ async function renderDetail(root, ctx, id) {
 			lastEventCount = task.events.length;
 		}
 		root.querySelector("#refresh-events").addEventListener("click", () => tick());
+		root.querySelector("#task-device")?.addEventListener("change", async (event) => {
+			const value = event.target.value;
+			try {
+				await api.patch(`/api/tasks/${task.id}`, { deviceId: value });
+				toast(value ? "项目已绑定设备" : "已解除设备绑定", "success");
+				tick();
+			} catch (error) {
+				toast(error.message, "error");
+			}
+		});
+		// 改归属会级联到名下的资产 / 发现 / 流量——老数据（1.0 里没有 companyId）也靠这一步补上。
+		root.querySelector("#task-company")?.addEventListener("change", async (event) => {
+			const value = event.target.value;
+			try {
+				await api.patch(`/api/tasks/${task.id}`, { companyId: value });
+				toast(value ? "已改归属：名下资产 / 发现 / 流量一起更新" : "已改为未归属", "success", 6000);
+				tick();
+			} catch (error) {
+				toast(error.message, "error");
+			}
+		});
 	};
 
 	const tick = async () => {

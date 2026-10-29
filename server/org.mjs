@@ -22,6 +22,62 @@ function countsOf(companyId) {
 		findings: store.state.findings.filter((f) => f.companyId === companyId).length,
 		reports: store.state.reports.filter((r) => r.companyId === companyId).length,
 		tasks: store.state.tasks.filter((t) => t.companyId === companyId).length,
+		traffic: (store.state.traffic ?? []).filter((t) => t.companyId === companyId).length,
+	};
+}
+
+/**
+ * 公司详情：不只是几个计数，而是把这家公司名下的项目、资产、发现、报告都摊开。
+ * 界面靠它做"公司 → 项目 → 资产 → 发现"的下钻；只给 counts 的话，
+ * 操作员看到"资产 12"却点不进去，等于没关联。
+ */
+export function companyDetail(id) {
+	const company = companies().find((entry) => entry.id === id);
+	if (!company) return null;
+	const assets = store.state.assets
+		.filter((asset) => asset.companyId === id)
+		.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : -1))
+		.map((asset) => ({
+			id: asset.id,
+			type: asset.type,
+			value: asset.value,
+			title: asset.title,
+			status: asset.status,
+			ip: asset.ip,
+			taskId: asset.taskId,
+			lastSeen: asset.lastSeen,
+		}));
+	const tasks = store.state.tasks
+		.filter((task) => task.companyId === id)
+		.map((task) => ({
+			id: task.id,
+			title: task.title,
+			status: task.status,
+			scope: task.scope ?? [],
+			createdAt: task.createdAt,
+			findings: store.state.findings.filter((f) => f.taskId === task.id).length,
+			assets: store.state.assets.filter((a) => a.taskId === task.id || a.lastTaskId === task.id).length,
+		}));
+	const findings = store.state.findings
+		.filter((finding) => finding.companyId === id)
+		.map((finding) => ({
+			id: finding.id,
+			title: finding.title,
+			severity: finding.severity,
+			status: finding.status,
+			target: finding.target,
+			taskId: finding.taskId,
+		}));
+	const reports = store.state.reports
+		.filter((report) => report.companyId === id)
+		.map((report) => ({ id: report.id, title: report.title, at: report.at, findings: report.findings }));
+	return {
+		company: { ...company, counts: countsOf(id) },
+		counts: countsOf(id),
+		assets,
+		tasks,
+		findings,
+		reports,
 	};
 }
 

@@ -154,6 +154,31 @@ function previewBody(body, contentType) {
 	return text.slice(0, limit);
 }
 
+/**
+ * 流量记录的统一入口。
+ *
+ * 每条流量都要带 taskId / companyId / conversationId / kind 四件套：
+ * 界面上「按任务看」「按公司看」「只看设备抓包」都靠它们分桶，
+ * 缺一个就会出现"请求明明发生了却查不到"。
+ */
+export function trafficEntry(task, entry = {}) {
+	return {
+		id: store.nextId("tr"),
+		at: new Date().toISOString(),
+		kind: "http",
+		taskId: task?.id ?? null,
+		companyId: task?.companyId ?? null,
+		conversationId: task?.conversationId ?? null,
+		method: "GET",
+		url: "",
+		status: 0,
+		ms: 0,
+		bytes: 0,
+		note: "",
+		...entry,
+	};
+}
+
 /** 跟随跳转的 GET；同时把每一跳都记进流量，报告里能还原链路。 */
 async function fetchWithRedirects(url, options, task) {
 	let current = url;
@@ -162,35 +187,33 @@ async function fetchWithRedirects(url, options, task) {
 		const response = await fetchOnce(current, options);
 		chain.push({ url: current, status: response.status ?? 0 });
 		if (response.error) {
-			store.addTraffic({
-				id: store.nextId("tr"),
-				at: new Date().toISOString(),
-				taskId: task?.id ?? null,
-				method: "GET",
-				url: current,
-				status: 0,
-				ms: response.ms ?? 0,
-				bytes: 0,
-				note: response.error,
-			});
+			store.addTraffic(
+				trafficEntry(task, {
+					method: "GET",
+					url: current,
+					status: 0,
+					ms: response.ms ?? 0,
+					bytes: 0,
+					note: response.error,
+				}),
+			);
 			return { ...response, finalUrl: current, chain };
 		}
-		store.addTraffic({
-			id: store.nextId("tr"),
-			at: new Date().toISOString(),
-			taskId: task?.id ?? null,
-			method: "GET",
-			url: current,
-			status: response.status,
-			ms: response.ms,
-			bytes: response.body ? Buffer.byteLength(response.body) : 0,
-			note: response.headers?.server ?? "",
-			// 业务建模要用到的原始素材：只留摘录，避免把状态文档撑爆。
-			requestHeaders: pickHeaders(options.headers),
-			responseHeaders: pickHeaders(response.headers),
-			contentType: String(response.headers?.["content-type"] ?? ""),
-			bodyPreview: previewBody(response.body, String(response.headers?.["content-type"] ?? "")),
-		});
+		store.addTraffic(
+			trafficEntry(task, {
+				method: "GET",
+				url: current,
+				status: response.status,
+				ms: response.ms,
+				bytes: response.body ? Buffer.byteLength(response.body) : 0,
+				note: response.headers?.server ?? "",
+				// 业务建模要用到的原始素材：只留摘录，避免把状态文档撑爆。
+				requestHeaders: pickHeaders(options.headers),
+				responseHeaders: pickHeaders(response.headers),
+				contentType: String(response.headers?.["content-type"] ?? ""),
+				bodyPreview: previewBody(response.body, String(response.headers?.["content-type"] ?? "")),
+			}),
+		);
 		const location = response.headers?.location;
 		if (response.status >= 300 && response.status < 400 && location) {
 			current = new URL(location, current).toString();
@@ -252,6 +275,9 @@ function upsertAsset(task, asset) {
 			lastSeen: now,
 			// 归属保留首次发现它的任务，只记最近一次触达的任务，免得资产在任务间来回跳。
 			...(task?.id ? { lastTaskId: task.id } : {}),
+			// 公司归属同理只补不清：资产先挂在别的客户名下时，不会被后一个任务抢走。
+			...(!record.companyId && task?.companyId ? { companyId: task.companyId } : {}),
+			...(!record.conversationId && task?.conversationId ? { conversationId: task.conversationId } : {}),
 		});
 	} else {
 		record = {
@@ -264,6 +290,8 @@ function upsertAsset(task, asset) {
 			tech: asset.tech ?? [],
 			status: "open",
 			taskId: task?.id ?? null,
+			companyId: task?.companyId ?? null,
+			conversationId: task?.conversationId ?? null,
 			firstSeen: now,
 			lastSeen: now,
 			notes: [],
@@ -283,6 +311,8 @@ function addFinding(task, finding) {
 	if (exists) {
 		exists.lastSeen = new Date().toISOString();
 		exists.occurrences = (exists.occurrences ?? 1) + 1;
+		// 后到的公司归属只在原记录没归属时补上，避免同一漏洞在两个客户之间跳。
+		if (!exists.companyId && task?.companyId) exists.companyId = task.companyId;
 		store.save();
 		return exists;
 	}
@@ -296,6 +326,8 @@ function addFinding(task, finding) {
 		recommendation: finding.recommendation ?? "",
 		source: finding.source ?? "recon",
 		taskId: task?.id ?? null,
+		companyId: task?.companyId ?? null,
+		conversationId: task?.conversationId ?? null,
 		status: "open",
 		createdAt: new Date().toISOString(),
 		lastSeen: new Date().toISOString(),
@@ -445,17 +477,21 @@ async function probePaths(task, baseUrl, options) {
 		if (task && activeRuns.get(task.id)?.aborted) return results;
 		const url = new URL(probe.path, baseUrl).toString();
 		const response = await fetchOnce(url, { ...options, bodyLimit: 64 * 1024 });
-		store.addTraffic({
-			id: store.nextId("tr"),
-			at: new Date().toISOString(),
-			taskId: task?.id ?? null,
-			method: "GET",
-			url,
-			status: response.status ?? 0,
-			ms: response.ms ?? 0,
-			bytes: response.body?.length ?? 0,
-			note: "probe",
-		});
+		store.addTraffic(
+			trafficEntry(task, {
+				method: "GET",
+				url,
+				status: response.status ?? 0,
+				ms: response.ms ?? 0,
+				bytes: response.body?.length ?? 0,
+				note: `探针 ${probe.path}`,
+				requestHeaders: pickHeaders(options.headers),
+				responseHeaders: pickHeaders(response.headers),
+				contentType: String(response.headers?.["content-type"] ?? ""),
+				bodyPreview: previewBody(response.body ?? "", String(response.headers?.["content-type"] ?? "")),
+				probe: true,
+			}),
+		);
 		if (response.error || response.status !== 200) continue;
 		if (probe.match(response.body ?? "")) {
 			results.push({
@@ -491,7 +527,7 @@ export function normalizeTarget(input) {
 	}
 }
 
-export function createTask({ title, scope }) {
+export function createTask({ title, scope, companyId = null, conversationId = null }) {
 	const targets = String(scope ?? "")
 		.split(/[\s,]+/)
 		.map((line) => line.trim())
@@ -507,6 +543,10 @@ export function createTask({ title, scope }) {
 		targets: limited,
 		status: "queued",
 		stage: "待命",
+		// 项目归属：公司决定交付给谁，会话决定这个项目是从哪次对话长出来的。
+		// 两个字段一路带到资产、发现与流量，界面才能按公司/会话把数据串起来。
+		companyId: companyId || null,
+		conversationId: conversationId || null,
 		createdAt: new Date().toISOString(),
 		startedAt: null,
 		finishedAt: null,
@@ -583,14 +623,29 @@ async function runTask(task) {
 
 		// 1) 解析
 		let ip = "";
+		let dnsError = "";
+		const dnsStarted = Date.now();
 		try {
 			const record = await lookup(target.host);
 			ip = record.address;
 			store.pushTaskEvent(task, "info", `DNS：${target.host} → ${ip}`);
 			upsertAsset(task, { type: "ip", value: ip, title: target.host });
 		} catch (error) {
-			store.pushTaskEvent(task, "warn", `DNS 解析失败：${error.code ?? error.message}（继续按域名尝试）`);
+			dnsError = error.code ?? error.message;
+			store.pushTaskEvent(task, "warn", `DNS 解析失败：${dnsError}（继续按域名尝试）`);
 		}
+		// DNS 也是一次真实的出网动作，记进流量：解析失败时它是"目标为什么不可达"的第一条证据。
+		store.addTraffic(
+			trafficEntry(task, {
+				kind: "dns",
+				method: "DNS",
+				url: `dns://${target.host}`,
+				status: ip ? 200 : 0,
+				ms: Date.now() - dnsStarted,
+				bytes: 0,
+				note: ip || dnsError || "DNS 查询",
+			}),
+		);
 
 		// 2) 首屏
 		const response = await fetchWithRedirects(target.baseUrl, options, task);

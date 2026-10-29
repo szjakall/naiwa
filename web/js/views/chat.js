@@ -1,15 +1,38 @@
 /**
- * 对话：多轮 + 真实模型调用。
- * 没有配模型端点时页面明确提示去哪配，不假装能聊。
+ * 对话：多轮 + 真实模型调用 + 项目（任务）绑定。
+ *
+ * 这个页面是"主 agent"的操作台，所以它同时要回答三个问题：
+ *   1. 这次对话对应哪个项目、现在跑到哪一步了（项目条）；
+ *   2. 刚才那几句话让模型对目标做了什么（消息里的工具折叠块 + 右侧实时流量）；
+ *   3. 要不要挂到某个客户、某台安卓设备上（绑定选择器）。
+ * 只有把这三件事摆在同一个屏幕里，操作员才不用来回跳页确认"到底动了没有"。
  */
 
 import { icon } from "../icons.js";
-import { api, fmtTime, html, mount, raw, relTime, toast, toNode } from "../core.js";
+import { api, fmtClock, html, mount, raw, relTime, statusChip, toast, toNode } from "../core.js";
 import { card, inlineError, loading } from "../ui.js";
+
+const TOOL_LABEL = {
+	project_overview: "查项目概况",
+	list_tasks: "列任务",
+	list_assets: "列资产",
+	list_findings: "列漏洞",
+	whois_lookup: "WHOIS 查询",
+	dns_lookup: "DNS 解析",
+	create_recon_task: "发起侦察",
+	record_finding: "记录漏洞",
+	generate_report: "生成报告",
+	list_devices: "列安卓设备",
+	device_exec: "设备命令",
+	device_screencap: "设备截屏",
+	device_logcat: "设备日志",
+	device_pull: "设备拉文件",
+	device_packages: "设备应用列表",
+};
 
 export default {
 	title: "对话",
-	subtitle: "与大模型的多轮会话",
+	subtitle: "与大模型的多轮会话（自动建项目 + 可操作安卓设备）",
 
 	async render(root, ctx) {
 		mount(root, loading("读取会话…"));
@@ -17,7 +40,7 @@ export default {
 		let current = null;
 		try {
 			const payload = await api.get("/api/chat");
-			list = payload.conversations;
+			list = payload.conversations ?? [];
 		} catch (error) {
 			mount(root, inlineError(error.message));
 			return;
@@ -47,13 +70,10 @@ export default {
 		});
 
 		// 支持 #/chat/<id> 直达；不带 id 时自动打开最近一条会话。
-		// 直接进「对话」页却看到"未选择会话"，会让人以为刚才的对话丢了。
 		const requested = ctx.param || list[0]?.id;
 		if (requested) {
 			try {
 				const loaded = await api.get(`/api/chat/${requested}`);
-				// 服务端理论上一定给 messages，但这里不能假设：缺字段会让整个页面
-				// 崩在 current.messages.length 上（UI 测试就抓到过）。
 				current = loaded && typeof loaded === "object"
 					? { ...loaded, messages: Array.isArray(loaded.messages) ? loaded.messages : [] }
 					: null;
@@ -62,14 +82,113 @@ export default {
 			}
 		}
 
+		// 实时流量：只跟当前会话，4 秒一轮。离开页面必须停掉。
+		let traffic = [];
+		let trafficTimer = null;
+		const loadTraffic = async () => {
+			if (!current?.id) return [];
+			try {
+				const items = await api.get(`/api/traffic?limit=12&conversationId=${encodeURIComponent(current.id)}`);
+				traffic = Array.isArray(items) ? items : [];
+			} catch {
+				traffic = [];
+			}
+			return traffic;
+		};
+
 		const paint = () => {
+			const project = current?.project ?? null;
+			const devices = current?.devices ?? [];
+			const companies = current?.companies ?? [];
+
+			const projectCard = card({
+				title: "项目",
+				sub: project ? `${project.id}` : "未绑定",
+				actions: project ? html`<a class="btn ghost small" href="#/tasks/${project.id}">打开</a>` : "",
+				body: project
+					? html`<div class="project-card">
+							<div class="row" style="gap:8px;align-items:center">
+								<span class="dim" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${project.title}</span>
+								${statusChip(project.running ? "running" : project.status)}
+							</div>
+							<div class="tiny muted mt-8">${project.stage || "—"} · 目标 ${(project.scope ?? []).length}</div>
+							<div class="project-metrics">
+								<span><strong>${project.assets ?? 0}</strong> 资产</span>
+								<span><strong>${project.findings ?? 0}</strong> 发现</span>
+								<span><strong>${project.traffic ?? 0}</strong> 流量</span>
+							</div>
+							<div class="row mt-12" style="gap:8px">
+								<a class="btn ghost small" href="#/traffic?taskId=${project.id}">看流量</a>
+								<a class="btn ghost small" href="#/tasks/${project.id}">看项目</a>
+							</div>
+						</div>`
+					: html`<div class="small muted">
+							还没有项目。在下面说一句"对 example.com 做评估"，会话会自动建一个项目并开始侦察；
+							模型也可以随时用 create_recon_task 追加目标。
+						</div>`,
+			});
+
+			const bindCard = card({
+				title: "绑定",
+				sub: "归属与设备",
+				body: html`
+					<label class="field">
+						<span>公司（交付给谁）</span>
+						<select id="bind-company">
+							<option value="">未归属</option>
+							${companies.map(
+								(company) =>
+									html`<option value="${company.id}" ${company.id === current?.companyId ? "selected" : ""}>${company.name}</option>`,
+							)}
+						</select>
+					</label>
+					<label class="field mb-0">
+						<span>安卓设备（本会话默认操作哪台）</span>
+						<select id="bind-device">
+							<option value="">自动（唯一在线设备）</option>
+							${devices.map(
+								(device) =>
+									html`<option value="${device.id}" ${device.id === current?.deviceId ? "selected" : ""}>
+										${device.name} · ${device.model ?? "?"} · ${device.liveness}
+									</option>`,
+							)}
+						</select>
+					</label>
+					<div class="tiny muted mt-8">
+						${devices.length
+							? "设备命令会走守门：人工审批模式下在「守门」页放行后才执行。"
+							: html`没有设备接入。到「安卓设备」页建令牌，用 regedit-droid APK 拨进来。`}
+					</div>
+				`,
+			});
+
+			const trafficCard = card({
+				title: "流量",
+				sub: `${traffic.length} 条（最近）`,
+				actions: current ? html`<a class="btn ghost small" href="#/traffic?conversationId=${current.id}">全部</a>` : "",
+				body: traffic.length
+					? html`<div class="traffic-tail">
+							${traffic.slice(0, 8).map(
+								(item) => html`<div class="traffic-tail-row">
+									<span class="chip ${item.status === 0 ? "chip-danger" : item.status < 300 ? "chip-ok" : "chip-warn"}">${item.status || "ERR"}</span>
+									<span class="mono tiny">${item.method}</span>
+									<span class="tiny break" title="${item.url}">${item.url}</span>
+									<span class="tiny muted nowrap">${fmtClock(item.at)}</span>
+								</div>`,
+							)}
+						</div>`
+					: html`<div class="small muted">这个会话还没有产生流量。任务跑起来后，DNS / HTTP / 设备命令都会在这里出现。</div>`,
+			});
+
 			const sidebar = list.length
-				? html`<div style="display:flex;flex-direction:column;gap:4px;max-height:66vh;overflow:auto">
+				? html`<div style="display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto">
 						${list.map(
 							(conversation) => html`<div class="nav-item ${current?.id === conversation.id ? "active" : ""}" data-open="${conversation.id}" style="cursor:pointer">
 								<div style="min-width:0;flex:1">
 									<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${conversation.title}</div>
-									<div class="tiny muted">${conversation.messageCount} 条 · ${relTime(conversation.updatedAt)}</div>
+									<div class="tiny muted">
+										${conversation.messageCount} 条 · ${relTime(conversation.updatedAt)}${conversation.taskId ? ` · ${conversation.taskId}` : ""}
+									</div>
 								</div>
 							</div>`,
 						)}
@@ -84,15 +203,17 @@ export default {
 								<div class="row tiny muted" style="gap:8px;margin-bottom:6px">
 									<span>${message.role === "user" ? "我" : "模型"}</span>
 									${message.model ? html`<span class="chip chip-muted">${message.model}</span>` : ""}
+									${message.projectId ? html`<a class="chip chip-info" href="#/tasks/${message.projectId}">${message.projectId}</a>` : ""}
 									${message.inputTokens ? html`<span title="输入（prompt）token">输入 ${message.inputTokens}</span>` : ""}
 									${message.outputTokens ? html`<span title="输出（completion）token">输出 ${message.outputTokens}</span>` : ""}
 									${message.reasoningTokens ? html`<span title="推理过程消耗的 token">推理 ${message.reasoningTokens}</span>` : ""}
 									${!message.inputTokens && message.tokens ? html`<span>${message.tokens} tokens</span>` : ""}
 									${message.finishReason && message.finishReason !== "stop" ? html`<span class="chip chip-warn">${message.finishReason}</span>` : ""}
 									<span class="spacer"></span>
-									<span>${message.at ? fmtTime(message.at).slice(11, 19) : ""}</span>
+									<span>${message.at ? fmtClock(message.at) : ""}</span>
 								</div>
 								${message.note ? html`<div class="hint-box" style="margin-bottom:8px">${raw(icon("alert", { size: 15 }))}<span>${message.note}</span></div>` : ""}
+								${message.projectNote ? html`<div class="hint-box hint-ok" style="margin-bottom:8px">${raw(icon("layers", { size: 15 }))}<span>${message.projectNote}</span></div>` : ""}
 								${Array.isArray(message.toolCalls) && message.toolCalls.length
 									? html`<div class="chat-tools">
 											${message.toolCalls.map(
@@ -100,7 +221,7 @@ export default {
 													<summary>
 														${raw(icon("terminal", { size: 14 }))}
 														<span class="mono tiny">${call.name}</span>
-														<span class="tiny muted">${call.ok ? "完成" : "失败"}</span>
+														<span class="tiny muted">${TOOL_LABEL[call.name] ?? ""} ${call.ok ? "完成" : "失败"}</span>
 													</summary>
 													<pre class="tiny">${JSON.stringify(call.args, null, 2)}</pre>
 													<pre class="tiny">${call.summary}</pre>
@@ -113,8 +234,7 @@ export default {
 						)
 				: html`<div class="muted small" style="padding:20px 0">还没有消息。${hasModel ? "在下面输入开始。" : "先到「设置 → 模型」加一个端点。"}</div>`;
 
-			// 状态条：让操作员一眼看到"用的是哪个模型、当前这条会话什么状态"，
-			// 而不是发了消息只看到一片空白不知道发生了什么。
+			// 状态条：让操作员一眼看到"用的是哪个模型、当前这条会话什么状态"。
 			const statusBar = html`<div class="chat-status">
 				<div class="row tiny muted" style="gap:14px;flex-wrap:wrap">
 					<span>${llmState?.effectiveFrom ? html`模型 <strong style="color:var(--fg)">${llmState.effectiveFrom.modelId}</strong>（${llmState.effectiveFrom.name}）` : html`<span style="color:#ff9dae">未配置模型</span>`}</span>
@@ -151,7 +271,7 @@ export default {
 					<div class="split page-section">
 						${card({
 							title: current ? current.title : "未选择会话",
-							sub: current ? `${current.messages.length} 条消息` : "",
+							sub: current ? `${current.messages.length} 条消息${project ? ` · 项目 ${project.id}` : ""}` : "",
 							actions: current
 								? html`<button class="btn-icon danger" id="del-chat" title="删除会话">${raw(icon("trash", { size: 16 }))}</button>`
 								: "",
@@ -159,7 +279,7 @@ export default {
 								${statusBar}
 								<div id="messages" style="max-height:52vh;overflow:auto;padding-right:6px">${messages}</div>
 								<div class="mt-12">
-									<textarea id="composer" rows="3" placeholder="${hasModel ? "输入消息，Ctrl+Enter 发送" : "未配置模型端点"}" ${hasModel && current ? "" : "disabled"}></textarea>
+									<textarea id="composer" rows="3" placeholder="${hasModel ? "说一句带目标的活儿，例如：对 example.com 与 www.example.com 做暴露面评估。Ctrl+Enter 发送" : "未配置模型端点"}" ${hasModel && current ? "" : "disabled"}></textarea>
 									<div class="row mt-8">
 										<button class="btn primary small" id="send" ${hasModel && current ? "" : "disabled"}>发送</button>
 										<span class="spacer"></span>
@@ -168,7 +288,12 @@ export default {
 								</div>
 							`,
 						})}
-						${card({ title: "会话", sub: `${list.length} 条`, body: sidebar })}
+						<div class="grid" style="gap:14px">
+							${projectCard}
+							${bindCard}
+							${card({ title: "会话", sub: `${list.length} 条`, body: sidebar })}
+							${trafficCard}
+						</div>
 					</div>
 				`,
 			);
@@ -183,6 +308,31 @@ export default {
 				}),
 			);
 
+			const bindCompany = root.querySelector("#bind-company");
+			if (bindCompany) {
+				bindCompany.addEventListener("change", async () => {
+					try {
+						await api.patch(`/api/chat/${current.id}`, { companyId: bindCompany.value });
+						toast("已更新归属", "success");
+						ctx.reload();
+					} catch (error) {
+						toast(error.message, "error");
+					}
+				});
+			}
+			const bindDevice = root.querySelector("#bind-device");
+			if (bindDevice) {
+				bindDevice.addEventListener("change", async () => {
+					try {
+						await api.patch(`/api/chat/${current.id}`, { deviceId: bindDevice.value });
+						toast(bindDevice.value ? "已绑定设备，本会话的设备工具默认用它" : "已改为自动选择设备", "success");
+						ctx.reload();
+					} catch (error) {
+						toast(error.message, "error");
+					}
+				});
+			}
+
 			const sendButton = root.querySelector("#send");
 			if (sendButton) {
 				const send = async () => {
@@ -196,13 +346,13 @@ export default {
 					try {
 						const result = await api.post(`/api/chat/${current.id}/messages`, { content });
 						composer.value = "";
-						// 服务端把"空正文/被截断"的原因放在 note 里，必须让操作员看到
+						// 项目是这一轮最重要的副作用，先说它，再说模型回没回话。
+						if (result.project) toast(result.project.created ? `已自动建项目 ${result.project.id} 并开始侦察` : `已并入项目 ${result.project.id}`, "success", 6000);
 						if (result.note) toast(result.note, "info", 9000);
-						else toast(`已回复（${result.elapsedMs}ms，${result.tokens} tokens）`, "success");
+						else if (!result.project) toast(`已回复（${result.elapsedMs}ms，${result.tokens} tokens）`, "success");
 						ctx.reload();
 					} catch (error) {
-						// 关键：失败时也要刷新。服务端已经把用户消息和失败原因存进会话了，
-						// 不刷新的话界面上还是空的，看起来像"什么都没发生"。
+						// 关键：失败时也要刷新。服务端已经把用户消息和失败原因存进会话了。
 						toast(error.message, "error", 8000);
 						root.querySelector("#send-status").textContent = error.message;
 						root.querySelector("#send-inline").textContent = "失败，见会话里的错误记录";
@@ -250,6 +400,29 @@ export default {
 			}
 		};
 
+		await loadTraffic();
 		paint();
+
+		if (current?.id) {
+			trafficTimer = setInterval(async () => {
+				const prevFirst = traffic[0]?.id;
+				const prevLen = traffic.length;
+				const after = await loadTraffic();
+				// 有新包才重绘，避免每 4 秒把输入框里的草稿和滚动位置重置掉。
+				if (after.length !== prevLen || after[0]?.id !== prevFirst) {
+					const draft = root.querySelector("#composer")?.value ?? "";
+					paint();
+					const composer = root.querySelector("#composer");
+					if (composer && draft) composer.value = draft;
+					const messagesNode = root.querySelector("#messages");
+					if (messagesNode) messagesNode.scrollTop = messagesNode.scrollHeight;
+				}
+			}, 4000);
+		}
+
+		return () => {
+			if (trafficTimer) clearInterval(trafficTimer);
+			trafficTimer = null;
+		};
 	},
 };

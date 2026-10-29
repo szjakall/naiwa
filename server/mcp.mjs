@@ -109,7 +109,7 @@ export async function testServer(id) {
 				params: {
 					protocolVersion: "2024-11-05",
 					capabilities: {},
-					clientInfo: { name: "regedit", version: "1.0.0" },
+					clientInfo: { name: "regedit", version: "1.1.0" },
 				},
 			}),
 			signal: controller.signal,

@@ -1629,3 +1629,143 @@ th.nowrap {
 	font-size: 12px;
 	padding: 5px 9px;
 }
+
+/* ---------------------------------------------------------------- 关联展示
+   项目/公司/资产/流量的下钻都用这几组：行可点、键值对齐、包体双栏。
+   信息密度优先，但每条记录都要能一眼看出"它属于谁"。 */
+
+.link {
+	color: var(--accent-2);
+	text-decoration: none;
+	border-bottom: 1px dotted rgba(63, 155, 240, 0.5);
+}
+.link:hover {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+
+tr.clickable {
+	cursor: pointer;
+}
+tr.clickable:hover td {
+	background: rgba(63, 224, 166, 0.045);
+}
+
+.kv-k {
+	color: var(--muted);
+	font-size: 12px;
+}
+.kv-v {
+	color: var(--text-dim);
+	word-break: break-word;
+	min-width: 0;
+}
+
+.traffic-row {
+	cursor: pointer;
+}
+.traffic-row:hover td {
+	background: rgba(63, 224, 166, 0.04);
+}
+.traffic-caret {
+	display: inline-block;
+	width: 12px;
+	color: var(--muted);
+}
+.traffic-detail td {
+	background: rgba(0, 0, 0, 0.28);
+	padding: 0;
+}
+.traffic-packet {
+	padding: 12px 16px 16px;
+	border-left: 2px solid rgba(63, 224, 166, 0.35);
+}
+.traffic-cap {
+	font-size: 11px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+	margin-bottom: 6px;
+}
+.traffic-cols {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+}
+.traffic-body {
+	margin: 0;
+	padding: 10px 12px;
+	background: rgba(0, 0, 0, 0.3);
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-sm);
+	max-height: 260px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--mono);
+	color: var(--text-dim);
+}
+
+/* 对话页右侧的实时流量尾巴 */
+.traffic-tail {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-height: 240px;
+	overflow: auto;
+}
+.traffic-tail-row {
+	display: grid;
+	grid-template-columns: auto auto minmax(0, 1fr) auto;
+	gap: 8px;
+	align-items: center;
+	padding: 5px 7px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid var(--line-soft);
+}
+.traffic-tail-row .break {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* 对话页的项目卡 */
+.project-card .project-metrics {
+	display: flex;
+	gap: 16px;
+	margin-top: 10px;
+	font-size: 12px;
+	color: var(--muted);
+}
+.project-card .project-metrics strong {
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 14px;
+}
+
+/* 公司展开后的三栏：项目 / 资产 / 发现 */
+.company-detail td {
+	background: rgba(0, 0, 0, 0.24);
+	padding: 0;
+}
+.company-panels {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 16px;
+	padding: 12px 16px 16px;
+	border-left: 2px solid rgba(63, 155, 240, 0.35);
+}
+
+.hint-box.hint-ok {
+	border-color: rgba(63, 224, 166, 0.32);
+	background: rgba(63, 224, 166, 0.07);
+}
+
+@media (max-width: 1100px) {
+	.traffic-cols,
+	.company-panels {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

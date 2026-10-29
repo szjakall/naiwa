@@ -26,7 +26,7 @@ import {
 } from "./auth.mjs";
 import { readJson, readRaw, sendError, sendJson, sendText } from "./http.mjs";
 import { analyzeApk } from "./apk.mjs";
-import { createTask, isRunning, startTask, stopTask } from "./recon.mjs";
+import { createTask, isRunning, startTask, stopTask, trafficEntry } from "./recon.mjs";
 import { generateReport } from "./reports.mjs";
 import { listSkills, readSkill } from "./skills.mjs";
 import {
@@ -117,6 +117,7 @@ import {
 	deleteConversation,
 	getConversation,
 	listConversations,
+	patchConversation,
 	renameConversation,
 	sendMessage as sendChatMessage,
 	setGoal,
@@ -125,6 +126,7 @@ import {
 import {
 	SECTION_LABELS,
 	assignCompany,
+	companyDetail,
 	deleteCompany,
 	deleteTemplate,
 	getReportSettings,
@@ -254,10 +256,12 @@ on(
 						android: { autostart: settings.android.autostart },
 						stats: {
 							tasks: store.state.tasks.length,
+							running: store.state.tasks.filter((task) => task.status === "running").length,
 							assets: store.state.assets.length,
 							findings: store.state.findings.filter((finding) => finding.status === "open").length,
 							devices: store.state.droid.devices.length,
 							pending: decisionStats().pending,
+							traffic: (store.state.traffic ?? []).length,
 						},
 					}
 				: {}),
@@ -357,6 +361,7 @@ on("GET", "/api/overview", async ({ res }) => {
 // ---------------------------------------------------------------- 任务
 
 on("GET", "/api/tasks", async ({ res }) => {
+	const companies = new Map((store.state.companies ?? []).map((company) => [company.id, company.name]));
 	sendJson(
 		res,
 		200,
@@ -364,13 +369,21 @@ on("GET", "/api/tasks", async ({ res }) => {
 			...task,
 			running: isRunning(task.id),
 			findings: store.state.findings.filter((finding) => finding.taskId === task.id).length,
+			assets: store.state.assets.filter((asset) => asset.taskId === task.id || asset.lastTaskId === task.id).length,
+			traffic: (store.state.traffic ?? []).filter((item) => item.taskId === task.id).length,
+			companyName: task.companyId ? (companies.get(task.companyId) ?? "") : "",
 		})),
 	);
 });
 
 on("POST", "/api/tasks", async ({ req, res }) => {
 	const body = await readJson(req);
-	const task = createTask({ title: body.title, scope: body.scope });
+	const task = createTask({
+		title: body.title,
+		scope: body.scope,
+		companyId: body.companyId ?? null,
+		conversationId: body.conversationId ?? null,
+	});
 	if (task.targets.length === 0) return sendError(res, 400, "范围内没有可识别的目标（需要域名或 URL）");
 	store.log("info", `创建任务：${task.title}（${task.targets.length} 个目标）`);
 	if (body.autorun !== false) {
@@ -398,7 +411,17 @@ on("GET", "/api/tasks/:id", async ({ res, params }) => {
 	if (!task) return sendError(res, 404, "任务不存在");
 	const findings = store.state.findings.filter((finding) => finding.taskId === task.id);
 	const traffic = store.state.traffic.filter((item) => item.taskId === task.id).slice(-60);
-	sendJson(res, 200, { task: { ...task, running: isRunning(task.id) }, findings, traffic });
+	// 项目详情要把"这个任务产出的资产"一起给：任务页的资产数是它自己的，不是全站资产数。
+	const assets = store.state.assets.filter((asset) => asset.taskId === task.id || asset.lastTaskId === task.id);
+	const conversation = task.conversationId ? (store.state.conversations ?? []).find((c) => c.id === task.conversationId) : null;
+	sendJson(res, 200, {
+		task: { ...task, running: isRunning(task.id) },
+		findings,
+		traffic,
+		assets,
+		conversation: conversation ? { id: conversation.id, title: conversation.title } : null,
+		company: task.companyId ? (store.state.companies ?? []).find((c) => c.id === task.companyId) ?? null : null,
+	});
 });
 
 on("POST", "/api/tasks/:id/run", async ({ res, params }) => {
@@ -434,10 +457,47 @@ on("DELETE", "/api/tasks/:id", async ({ res, params }) => {
 	sendJson(res, 200, { ok: true });
 });
 
+on("PATCH", "/api/tasks/:id", async ({ req, res, params }) => {
+	const task = store.state.tasks.find((entry) => entry.id === params.id);
+	if (!task) return sendError(res, 404, "任务不存在");
+	const body = await readJson(req);
+	if (body.title !== undefined) task.title = String(body.title).slice(0, 120) || task.title;
+	// 归属可以事后补：项目跑完才发现该挂到某个客户名下是常态。
+	if (body.companyId !== undefined) {
+		const companyId = String(body.companyId ?? "").trim();
+		if (companyId && !(store.state.companies ?? []).some((company) => company.id === companyId)) {
+			return sendError(res, 400, "公司不存在");
+		}
+		task.companyId = companyId || null;
+		// 项目改归属时，跟着它产生的资产/发现/流量一起改——否则界面上公司下面挂不住数据。
+		for (const asset of store.state.assets) {
+			if (asset.taskId === task.id) asset.companyId = task.companyId;
+		}
+		for (const finding of store.state.findings) {
+			if (finding.taskId === task.id) finding.companyId = task.companyId;
+		}
+		for (const item of store.state.traffic ?? []) {
+			if (item.taskId === task.id) item.companyId = task.companyId;
+		}
+	}
+	if (body.note !== undefined) store.pushTaskEvent(task, "info", String(body.note).slice(0, 300));
+	// 项目也可以绑设备：会话没绑时，对话里的设备工具就用项目绑的这台。
+	if (body.deviceId !== undefined) task.deviceId = String(body.deviceId ?? "").trim() || null;
+	store.save();
+	sendJson(res, 200, { ok: true, task });
+});
+
 // ---------------------------------------------------------------- 资产 / 漏洞
 
-on("GET", "/api/assets", async ({ res }) => {
-	sendJson(res, 200, store.state.assets);
+on("GET", "/api/assets", async ({ res, query }) => {
+	const companyId = query.get("companyId");
+	const taskId = query.get("taskId");
+	const kind = query.get("kind");
+	let items = store.state.assets ?? [];
+	if (companyId) items = items.filter((asset) => asset.companyId === companyId);
+	if (taskId) items = items.filter((asset) => asset.taskId === taskId || asset.lastTaskId === taskId);
+	if (kind && kind !== "all") items = items.filter((asset) => asset.type === kind);
+	sendJson(res, 200, items);
 });
 
 on("PATCH", "/api/assets/:id", async ({ req, res, params }) => {
@@ -536,7 +596,18 @@ on("GET", "/api/skills/:id", async ({ res, params }) => {
 
 on("GET", "/api/traffic", async ({ res, query }) => {
 	const limit = Math.min(Number(query.get("limit") ?? 200) || 200, 1000);
-	sendJson(res, 200, store.state.traffic.slice(-limit).reverse());
+	const taskId = query.get("taskId");
+	const companyId = query.get("companyId");
+	const conversationId = query.get("conversationId");
+	const kind = query.get("kind");
+	const keyword = String(query.get("q") ?? "").trim().toLowerCase();
+	let items = store.state.traffic ?? [];
+	if (taskId) items = items.filter((item) => item.taskId === taskId);
+	if (companyId) items = items.filter((item) => item.companyId === companyId);
+	if (conversationId) items = items.filter((item) => item.conversationId === conversationId);
+	if (kind && kind !== "all") items = items.filter((item) => (item.kind ?? "http") === kind);
+	if (keyword) items = items.filter((item) => `${item.url ?? ""} ${item.note ?? ""} ${item.method ?? ""}`.toLowerCase().includes(keyword));
+	sendJson(res, 200, items.slice(-limit).reverse());
 });
 
 on("GET", "/api/logs", async ({ res, query }) => {
@@ -558,7 +629,7 @@ on("GET", "/api/settings", async ({ res }) => {
 on("PUT", "/api/settings", async ({ req, res }) => {
 	const body = await readJson(req);
 	const settings = readSettings();
-	for (const key of ["site", "recon", "llm", "mcp", "android", "skills"]) {
+	for (const key of ["site", "recon", "llm", "mcp", "android", "skills", "chat"]) {
 		if (body[key] === undefined) continue;
 		if (key === "llm" && body.llm?.apiKey === "••••••••") {
 			const { apiKey, ...rest } = body.llm;
@@ -900,6 +971,19 @@ on("POST", "/api/android/devices/:id/capture", async ({ req, res, params }) => {
 	const action = String(body.action ?? "status");
 	if (action === "start") {
 		const result = await gateway.captureStart(device.deviceId, body.iface ?? "any", Number(body.seconds ?? 30));
+		// 抓包也是一次"出网"动作：在流量页留一行，操作员才知道这台机器上到底有没有在收包。
+		store.addTraffic(
+			trafficEntry(null, {
+				kind: "device",
+				method: "PCAP",
+				url: `device://${device.name}/capture`,
+				status: result.ok === false ? 0 : 200,
+				ms: 0,
+				bytes: 0,
+				note: result.ok === false ? String(result.error ?? "抓包启动失败") : `开始抓包 ${body.iface ?? "any"} / ${Number(body.seconds ?? 30)}s`,
+				deviceId: device.id,
+			}),
+		);
 		return sendJson(res, 200, result);
 	}
 	if (action === "stop") {
@@ -909,8 +993,30 @@ on("POST", "/api/android/devices/:id/capture", async ({ req, res, params }) => {
 			const name = `capture-${device.id}-${Date.now()}.pcap`;
 			const file = join(ARTIFACT_DIR, name);
 			writeFileSync(file, result.bytes);
+			store.addTraffic(
+				trafficEntry(null, {
+					kind: "device",
+					method: "PCAP",
+					url: `/api/android/artifacts/${name}`,
+					status: 200,
+					ms: 0,
+					bytes: result.bytes.length,
+					note: `${device.name} 抓包落盘（${(result.bytes.length / 1024).toFixed(1)}KB）`,
+					deviceId: device.id,
+				}),
+			);
 			return sendJson(res, 200, { ok: true, file: `/api/android/artifacts/${name}`, size: result.bytes.length });
 		}
+		store.addTraffic(
+			trafficEntry(null, {
+				kind: "device",
+				method: "PCAP",
+				url: `device://${device.name}/capture`,
+				status: 0,
+				note: `抓包停止但没拿到数据：${result.error ?? "设备没有返回 pcap"}`,
+				deviceId: device.id,
+			}),
+		);
 		return sendJson(res, 200, result);
 	}
 	const result = await gateway.captureStatus(device.deviceId);
@@ -1607,7 +1713,34 @@ on("POST", "/api/chat", async ({ req, res }) => {
 on("GET", "/api/chat/:id", async ({ res, params }) => {
 	const conversation = getConversation(params.id);
 	if (!conversation) return sendError(res, 404, "会话不存在");
-	sendJson(res, 200, conversation);
+	const task = conversation.taskId ? (store.state.tasks ?? []).find((entry) => entry.id === conversation.taskId) : null;
+	sendJson(res, 200, {
+		...conversation,
+		// 会话页要在顶部画"项目条"、右下角画"设备选择"和"实时流量"，
+		// 一次带上，省三个串行请求。
+		project: task
+			? {
+					id: task.id,
+					title: task.title,
+					status: task.status,
+					stage: task.stage,
+					running: isRunning(task.id),
+					scope: task.scope ?? [],
+					stats: task.stats ?? {},
+					findings: store.state.findings.filter((finding) => finding.taskId === task.id).length,
+					assets: store.state.assets.filter((asset) => asset.taskId === task.id || asset.lastTaskId === task.id).length,
+					traffic: (store.state.traffic ?? []).filter((item) => item.taskId === task.id).length,
+				}
+			: null,
+		companies: (store.state.companies ?? []).map((company) => ({ id: company.id, name: company.name })),
+		devices: gateway.devices().map((device) => ({
+			id: device.id,
+			name: device.name,
+			model: device.model,
+			liveness: device.liveness,
+			rooted: device.rooted === true,
+		})),
+	});
 });
 
 on("POST", "/api/chat/:id/messages", async ({ req, res, params }) => {
@@ -1617,6 +1750,17 @@ on("POST", "/api/chat/:id/messages", async ({ req, res, params }) => {
 
 on("PATCH", "/api/chat/:id", async ({ req, res, params }) => {
 	const body = await readJson(req);
+	// 项目/设备/公司绑定走 patchConversation；其余字段维持原来的单分支语义。
+	if (body.taskId !== undefined || body.deviceId !== undefined || body.companyId !== undefined) {
+		const patched = patchConversation(params.id, {
+			...(body.taskId !== undefined ? { taskId: body.taskId } : {}),
+			...(body.deviceId !== undefined ? { deviceId: body.deviceId } : {}),
+			...(body.companyId !== undefined ? { companyId: body.companyId } : {}),
+		});
+		if (!patched) return sendError(res, 404, "会话不存在");
+		if (patched.error) return sendError(res, 400, patched.error);
+		return sendJson(res, 200, patched);
+	}
 	const conversation = body.archived !== undefined
 		? archiveConversation(params.id, body.archived === true)
 		: body.goal !== undefined
@@ -1641,6 +1785,12 @@ on("GET", "/api/companies", async ({ res }) => {
 on("POST", "/api/companies", async ({ req, res }) => {
 	const body = await readJson(req);
 	sendJson(res, 200, upsertCompany(body));
+});
+
+on("GET", "/api/companies/:id", async ({ res, params }) => {
+	const detail = companyDetail(params.id);
+	if (!detail) return sendError(res, 404, "公司不存在");
+	sendJson(res, 200, detail);
 });
 
 on("DELETE", "/api/companies/:id", async ({ res, params }) => {

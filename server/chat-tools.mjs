@@ -10,11 +10,16 @@
  */
 
 import { lookup as dnsLookup, resolve4, resolveMx, resolveNs, resolveTxt } from "node:dns/promises";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { connect } from "node:net";
-import { store } from "./store.mjs";
-import { addFinding, createTask, normalizeTarget } from "./recon.mjs";
-import { generateReport } from "./reports.mjs";
+import { ARTIFACT_DIR } from "./config.mjs";
+import { gateway } from "./droid.mjs";
 import { guard } from "./gatekeeper.mjs";
+import { addFinding, createTask, normalizeTarget, trafficEntry } from "./recon.mjs";
+import { generateReport } from "./reports.mjs";
+import { store } from "./store.mjs";
+import { isEnabled } from "./tools.mjs";
 
 const MAX_RESULT_CHARS = 4000;
 
@@ -211,15 +216,152 @@ export const CHAT_TOOLS = [
 			},
 		},
 	},
+	// ------------------------------------------------ 安卓设备（和「安卓设备」页同一个网关）
+	{
+		type: "function",
+		function: {
+			name: "list_devices",
+			description: "列出已接入的安卓设备（名称、机型、Android 版本、是否 root、在线/无响应/离线）。动设备前先用它确认接哪台。",
+			parameters: { type: "object", properties: {}, required: [] },
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "device_exec",
+			description:
+				"在安卓设备上执行一条 shell 命令并拿回 stdout/stderr/退出码（可在已 root 设备上 asRoot=true 用 su）。受守门约束，人工审批模式下会排队。只读排查优先：id、getprop、pm list packages、cat /data/... 下的配置。",
+			parameters: {
+				type: "object",
+				properties: {
+					cmd: { type: "string", description: "要执行的命令" },
+					asRoot: { type: "boolean", description: "是否用 su 提权执行，默认 false" },
+					deviceId: { type: "string", description: "设备 id；不传时用会话绑定的设备或唯一在线设备" },
+					timeoutMs: { type: "integer", description: "超时毫秒，默认 30000" },
+				},
+				required: ["cmd"],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "device_screencap",
+			description: "给安卓设备截一张屏，PNG 落到控制台产物目录并返回下载地址（模型拿不到像素，只需把地址给操作员）。",
+			parameters: {
+				type: "object",
+				properties: { deviceId: { type: "string", description: "不传时用会话绑定的设备" } },
+				required: [],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "device_logcat",
+			description: "读安卓设备最近 N 行 logcat，可按关键字过滤（如包名、异常类名）。",
+			parameters: {
+				type: "object",
+				properties: {
+					lines: { type: "integer", description: "行数，默认 200，上限 2000" },
+					filter: { type: "string", description: "关键字过滤" },
+					deviceId: { type: "string" },
+				},
+				required: [],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "device_pull",
+			description: "从安卓设备拉一个文件到控制台产物目录（不把二进制塞进上下文），返回落盘路径与大小。",
+			parameters: {
+				type: "object",
+				properties: {
+					path: { type: "string", description: "设备上的绝对路径" },
+					deviceId: { type: "string" },
+				},
+				required: ["path"],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "device_packages",
+			description: "列出安卓设备上已安装的第三方应用包名，用于确定要分析/调试的目标应用。",
+			parameters: {
+				type: "object",
+				properties: {
+					all: { type: "boolean", description: "true 时连系统应用一起列，默认只列第三方" },
+					deviceId: { type: "string" },
+				},
+				required: [],
+			},
+		},
+	},
 ];
 
 /** 工具实现。返回 { ok, summary, data } —— summary 给模型看，data 给界面展开。 */
-export async function runChatTool(name, args = {}) {
+// ---------------------------------------------------------------- 设备选择
+
+/**
+ * 会话要能"直接对着手机说话"，所以设备解析顺序是：
+ * 显式 deviceId → 会话绑定的设备 → 唯一在线设备。多台在线且没绑定时明确要求指定，
+ * 而不是随便挑一台——把命令发错设备比报错难查得多。
+ */
+function resolveDevice(ctx = {}, explicitId) {
+	const devices = gateway.devices();
+	const wanted = String(explicitId || ctx.deviceId || "").trim();
+	if (wanted) {
+		const hit = devices.find((item) => item.id === wanted || item.deviceId === wanted);
+		if (!hit) return { error: `设备 ${wanted} 不在注册表里（先到「安卓设备」页确认设备 id）` };
+		if (hit.liveness === "offline") return { error: `设备「${hit.name}」当前离线：让手机端重开 APK 建立反连` };
+		return { device: hit };
+	}
+	const usable = devices.filter((item) => item.liveness !== "offline");
+	if (usable.length === 1) return { device: usable[0] };
+	if (usable.length === 0) {
+		return {
+			error:
+				"没有可用的安卓设备：先在「安卓设备 → 连接令牌」建一个令牌，用 regedit-droid APK 填地址和令牌拨进来（心跳进来就会出现在在线设备里）",
+		};
+	}
+	return {
+		error: `当前有 ${usable.length} 台设备在线（${usable
+			.map((item) => `${item.name}(${item.id})`)
+			.join("、")}），请在调用时指定 deviceId，或到对话页把会话绑定到其中一台`,
+	};
+}
+
+function deviceLabel(device) {
+	const flags = [`Android ${device.androidVersion ?? "?"}`];
+	if (device.model) flags.unshift(device.model);
+	if (device.rooted) flags.push("root");
+	return `${device.name}（${flags.join(" · ")}）`;
+}
+
+/** 把对话上下文折成 trafficEntry 认的形状：流量要按项目 / 公司 / 会话归账。 */
+function ctxTask(ctx = {}) {
+	return { id: ctx.taskId ?? null, companyId: ctx.companyId ?? null, conversationId: ctx.conversationId ?? null };
+}
+
+/** 设备产物（截屏/pcap/拉回来的文件）统一落 artifacts，只把可下载地址交给调用方。 */
+function saveArtifact(prefix, ext, bytes) {
+	const name = `${prefix}-${Date.now()}.${ext}`;
+	writeFileSync(join(ARTIFACT_DIR, name), bytes);
+	return { name, url: `/api/android/artifacts/${name}`, size: bytes.length };
+}
+
+export async function runChatTool(name, args = {}, ctx = {}) {
 	switch (name) {
 		case "project_overview": {
 			const open = (store.state.findings ?? []).filter((f) => f.status !== "closed");
 			const bySeverity = {};
 			for (const f of open) bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+			const task = ctx.taskId ? (store.state.tasks ?? []).find((t) => t.id === ctx.taskId) : null;
+			const devices = gateway.devices();
 			const data = {
 				tasks: (store.state.tasks ?? []).length,
 				running: (store.state.tasks ?? []).filter((t) => t.status === "running").length,
@@ -227,6 +369,11 @@ export async function runChatTool(name, args = {}) {
 				openFindings: open.length,
 				bySeverity,
 				reports: (store.state.reports ?? []).length,
+				traffic: (store.state.traffic ?? []).length,
+				companies: (store.state.companies ?? []).length,
+				devices: devices.length,
+				devicesOnline: devices.filter((d) => d.liveness === "online").length,
+				...(task ? { project: { id: task.id, title: task.title, status: task.status, stage: task.stage, scope: task.scope } } : {}),
 			};
 			return { ok: true, summary: trim(data), data };
 		}
@@ -276,8 +423,22 @@ export async function runChatTool(name, args = {}) {
 			const domain = String(args.domain ?? "").trim().toLowerCase();
 			if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return { ok: false, summary: `域名不合法：${domain}` };
 			const server = whoisServerFor(domain);
+			const started = Date.now();
 			try {
 				const raw = await whoisQuery(domain, server);
+				const ms = Date.now() - started;
+				// 对话发起的查询同样是出网动作：记一条流量，否则「流量」页会漏掉整段对话取证。
+				store.addTraffic(
+					trafficEntry(ctxTask(ctx), {
+						kind: "whois",
+						method: "WHOIS",
+						url: `whois://${server}/${domain}`,
+						status: raw.trim() ? 200 : 0,
+						ms,
+						bytes: raw.length,
+						note: raw.trim() ? "对话 Agent" : "无返回",
+					}),
+				);
 				if (!raw.trim()) return { ok: false, summary: `${server} 没有返回内容` };
 				// 只留关键行，避免把整段原始 whois 塞进模型上下文
 				const keys = /^(Domain Name|Registrar|Registrar WHOIS Server|Creation Date|Registry Expiry Date|Updated Date|Domain Status|Name Server|DNSSEC|Registrant Organization|Registrant Country):/i;
@@ -291,6 +452,17 @@ export async function runChatTool(name, args = {}) {
 					data: { domain, server, bytes: raw.length },
 				};
 			} catch (error) {
+				store.addTraffic(
+					trafficEntry(ctxTask(ctx), {
+						kind: "whois",
+						method: "WHOIS",
+						url: `whois://${server}/${domain}`,
+						status: 0,
+						ms: Date.now() - started,
+						bytes: 0,
+						note: error.message,
+					}),
+				);
 				return { ok: false, summary: `WHOIS 查询失败：${error.message}` };
 			}
 		}
@@ -298,6 +470,7 @@ export async function runChatTool(name, args = {}) {
 			const target = String(args.target ?? "").trim();
 			if (!target) return { ok: false, summary: "缺少 target" };
 			const record = String(args.record ?? "A").toUpperCase();
+			const started = Date.now();
 			try {
 				let value;
 				if (record === "A") value = await resolve4(target);
@@ -306,8 +479,30 @@ export async function runChatTool(name, args = {}) {
 				else if (record === "TXT") value = await resolveTxt(target);
 				else if (record === "PTR") value = await dnsLookup(target);
 				else value = await dnsLookup(target);
+				store.addTraffic(
+					trafficEntry(ctxTask(ctx), {
+						kind: "dns",
+						method: record,
+						url: `dns://${target}`,
+						status: 200,
+						ms: Date.now() - started,
+						bytes: JSON.stringify(value).length,
+						note: "对话 Agent",
+					}),
+				);
 				return { ok: true, summary: trim(`${record} ${target}\n${JSON.stringify(value, null, 2)}`), data: { target, record, value } };
 			} catch (error) {
+				store.addTraffic(
+					trafficEntry(ctxTask(ctx), {
+						kind: "dns",
+						method: record,
+						url: `dns://${target}`,
+						status: 0,
+						ms: Date.now() - started,
+						bytes: 0,
+						note: `${error.code ?? error.message}`,
+					}),
+				);
 				return { ok: false, summary: `${record} 查询失败：${error.code ?? error.message}` };
 			}
 		}
@@ -323,7 +518,34 @@ export async function runChatTool(name, args = {}) {
 			if (!parsed.length) {
 				return { ok: false, summary: `没有可识别的目标：${rawTargets.join(", ") || "(空)"}（需要域名或 http(s) URL）` };
 			}
-			const task = createTask({ title, scope: parsed.map((item) => item.input).join("\n") });
+			// 会话已经绑了项目就往这个项目里加目标，而不是每说一句就开一个新任务：
+			// 一个客户一次评估应该是一个项目，资产与流量才不会散在十几个任务里。
+			const bound = ctx.taskId ? (store.state.tasks ?? []).find((entry) => entry.id === ctx.taskId) : null;
+			let task;
+			let merged = 0;
+			if (bound) {
+				task = bound;
+				const known = new Set((task.targets ?? []).map((item) => item.input));
+				for (const target of parsed) {
+					if (known.has(target.input)) continue;
+					task.targets.push(target);
+					known.add(target.input);
+					merged += 1;
+				}
+				if (merged) {
+					task.scope = task.targets.map((item) => item.input);
+					task.stats = { ...(task.stats ?? {}), targets: task.targets.length };
+					store.pushTaskEvent(task, "info", `对话追加 ${merged} 个目标（共 ${task.targets.length} 个）`);
+					store.save();
+				}
+			} else {
+				task = createTask({
+					title,
+					scope: parsed.map((item) => item.input).join("\n"),
+					companyId: ctx.companyId ?? null,
+					conversationId: ctx.conversationId ?? null,
+				});
+			}
 			if (task.targets.length === 0) {
 				return { ok: false, summary: "目标解析后为空（需要域名或 http(s) URL）" };
 			}
@@ -395,6 +617,10 @@ export async function runChatTool(name, args = {}) {
 			// addFinding 只认 task，这里补上 taskId/assetId
 			if (args.taskId) record.taskId = String(args.taskId);
 			if (args.assetId) record.assetId = String(args.assetId);
+			// 归属跟着会话走：从对话记录下来的漏洞也要能被公司/项目筛出来。
+			if (!record.companyId && ctx.companyId) record.companyId = ctx.companyId;
+			if (!record.taskId && ctx.taskId) record.taskId = ctx.taskId;
+			if (!record.conversationId && ctx.conversationId) record.conversationId = ctx.conversationId;
 			store.save();
 			return {
 				ok: true,
@@ -412,6 +638,131 @@ export async function runChatTool(name, args = {}) {
 				ok: true,
 				summary: `报告已生成：${result.report.title}（${result.report.id}，${result.report.findings} 条发现 / ${result.report.assets} 个资产，${result.report.size} 字节）`,
 				data: result.report,
+			};
+		}
+		// ------------------------------------------------ 安卓设备
+		case "list_devices": {
+			const devices = gateway.devices();
+			if (!devices.length) {
+				return {
+					ok: true,
+					summary:
+						"还没有设备接入。「安卓设备 → 连接令牌」新建令牌，用 regedit-droid APK 填 `主机:端口` 与令牌；心跳进来后就会出现在列表里。",
+					data: [],
+				};
+			}
+			const data = devices.map((device) => ({
+				id: device.id,
+				name: device.name,
+				deviceId: device.deviceId,
+				model: device.model,
+				androidVersion: device.androidVersion,
+				rooted: device.rooted === true,
+				liveness: device.liveness,
+				bound: ctx.deviceId ? device.id === ctx.deviceId || device.deviceId === ctx.deviceId : false,
+			}));
+			return {
+				ok: true,
+				summary: trim(
+					data.map(
+						(item) =>
+							`${item.bound ? "* " : "- "}${item.name}｜${item.model ?? "?"}｜Android ${item.androidVersion ?? "?"}${item.rooted ? "｜root" : ""}｜${item.liveness}｜id=${item.id}`,
+					).join("\n"),
+				),
+				data,
+			};
+		}
+		case "device_exec": {
+			if (!isEnabled("device_exec")) return { ok: false, summary: "工具「设备命令」已停用（工具页开启后再试）" };
+			const cmd = String(args.cmd ?? "").trim();
+			if (!cmd) return { ok: false, summary: "cmd 为空" };
+			const picked = resolveDevice(ctx, args.deviceId);
+			if (picked.error) return { ok: false, summary: picked.error };
+			const device = picked.device;
+			const asRoot = args.asRoot === true;
+			const timeoutMs = Math.min(Math.max(Number(args.timeoutMs) || 30_000, 5_000), 300_000);
+			const gate = await guard({
+				scope: "deviceExec",
+				source: "对话 Agent",
+				target: deviceLabel(device),
+				command: cmd,
+				action: { kind: "deviceExec", deviceId: device.deviceId, cmd, asRoot, timeoutMs },
+			});
+			if (gate.kind === "pending") {
+				return {
+					ok: true,
+					summary: `已进入人工审批队列（审批单 ${gate.approvalId}）：当前是人工审批模式，操作员在「守门」页放行后才真正在 ${device.name} 上执行。排队不是失败。`,
+					data: { approvalId: gate.approvalId, device: device.name },
+				};
+			}
+			if (gate.kind === "block") {
+				return { ok: false, summary: `守门员拦下了这条命令：${gate.reason || "未给出理由"}` };
+			}
+			const result = gate.result ?? {};
+			// 设备侧把失败原因放 stderr（见 CHANGELOG #19），这里必须回退读它。
+			const stdout = String(result.stdout ?? "").trim();
+			const stderr = String(result.stderr ?? result.error ?? "").trim();
+			const body = [stdout, stderr && `[stderr] ${stderr}`].filter(Boolean).join("\n") || "(无输出)";
+			return {
+				ok: result.ok !== false,
+				summary: trim(`$ ${cmd}${asRoot ? "（root）" : ""} → exit ${result.code ?? result.exitCode ?? "?"}\n${body}`),
+				data: { device: device.name, code: result.code ?? result.exitCode ?? null, stdout: stdout.slice(0, 8000), stderr: stderr.slice(0, 4000) },
+			};
+		}
+		case "device_screencap": {
+			if (!isEnabled("device_screen")) return { ok: false, summary: "工具「设备截屏」已停用" };
+			const picked = resolveDevice(ctx, args.deviceId);
+			if (picked.error) return { ok: false, summary: picked.error };
+			const result = await gateway.screencap(picked.device.deviceId);
+			if (!result.ok) return { ok: false, summary: `截屏失败：${result.error ?? "设备没有返回图像"}` };
+			const saved = saveArtifact(`chat-screen-${picked.device.id}`, "png", result.bytes ?? Buffer.alloc(0));
+			return {
+				ok: true,
+				summary: `已截屏 ${picked.device.name}，PNG ${saved.size} 字节，下载地址 ${saved.url}（把它给操作员看即可）`,
+				data: saved,
+			};
+		}
+		case "device_logcat": {
+			if (!isEnabled("device_exec")) return { ok: false, summary: "工具「设备命令」已停用" };
+			const picked = resolveDevice(ctx, args.deviceId);
+			if (picked.error) return { ok: false, summary: picked.error };
+			const lines = Math.min(Math.max(Number(args.lines) || 200, 20), 2000);
+			const result = await gateway.logcat(picked.device.deviceId, lines, args.filter ? String(args.filter) : undefined);
+			const text = String(result.stdout ?? "").trim();
+			return {
+				ok: result.ok !== false,
+				summary: trim(`logcat ${picked.device.name}（最近 ${lines} 行）\n${text || result.error || "(无输出)"}`),
+				data: { device: picked.device.name, lines },
+			};
+		}
+		case "device_pull": {
+			if (!isEnabled("device_file")) return { ok: false, summary: "工具「设备文件」已停用" };
+			const path = String(args.path ?? "").trim();
+			if (!path) return { ok: false, summary: "path 为空" };
+			const picked = resolveDevice(ctx, args.deviceId);
+			if (picked.error) return { ok: false, summary: picked.error };
+			const result = await gateway.pull(picked.device.deviceId, path);
+			if (!result.ok) return { ok: false, summary: `拉取失败：${result.error ?? result.stderr ?? "设备没有返回内容"}` };
+			const bytes = result.bytes ?? Buffer.alloc(0);
+			const filename = path.split("/").pop() || "file.bin";
+			const safe = filename.replace(/[^\w.\-]/g, "_").slice(0, 60) || "file.bin";
+			const saved = saveArtifact(`chat-pull-${safe}`, "bin", bytes);
+			return {
+				ok: true,
+				summary: `已从 ${picked.device.name} 拉取 ${path}（${saved.size} 字节），落盘下载地址 ${saved.url}`,
+				data: { ...saved, path, device: picked.device.name },
+			};
+		}
+		case "device_packages": {
+			if (!isEnabled("device_exec")) return { ok: false, summary: "工具「设备命令」已停用" };
+			const picked = resolveDevice(ctx, args.deviceId);
+			if (picked.error) return { ok: false, summary: picked.error };
+			const result = await gateway.packages(picked.device.deviceId, args.all !== true, true);
+			const text = String(result.stdout ?? "").trim();
+			return {
+				ok: result.ok !== false,
+				summary: trim(`已安装应用（${picked.device.name}）\n${text || result.error || "(无输出)"}`),
+				data: { device: picked.device.name, count: text ? text.split(/\r?\n/).length : 0 },
 			};
 		}
 		default:
