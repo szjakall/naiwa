@@ -1,19 +1,54 @@
-# 运行时数据（账号、令牌、任务/资产/漏洞等业务数据）
-data/
-.devdata*/
+# backend
+/data/
+*.db
+*.db-wal
+*.db-shm
+config.json
+scheduler_state.json
+__pycache__/
+*.pyc
+*.pyo
 
-# 依赖与构建中间产物
-node_modules/
-android/build/
-android/.gradle/
+# frontend
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+web/next-env.d.ts
+*.local
 
-# 签名密钥：默认不入库。
-# 若需要"任何机器重编的 APK 都能覆盖安装"，可执行 `git add -f android/debug.keystore`，
-# 但请确认仓库不是公开的——这把密钥能签出你设备愿意升级的包。
-*.keystore
-*.jks
+# development tools
+.playwright-mcp/
+.playwright-cli/
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# 日志与临时文件
-*.log
+# docs
+/docs/
+
+# os
 .DS_Store
 Thumbs.db
+
+# claude code local state
+.claude/
+
+# 内嵌前端的单二进制产物
+/starry
+/server/webui/dist/
+
+# Docker 部署生成的本地环境（含密码/密钥，不提交）
+.env
+
+# build artifacts / local
+/web/node_modules
+/web/out
+/web/.next
+/server/webui/dist
+/data
+config.json
+server/skillsdist/
+
+# claude 会话导出（临时，不提交）
+*-this-session-is-being-continued-*.txt

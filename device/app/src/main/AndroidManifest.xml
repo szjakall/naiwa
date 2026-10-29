@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.starry.droid"
+    android:versionCode="9"
+    android:versionName="1.0.0">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      前台服务（反连必须常驻）。Android 14 起每个前台服务类型都要单独申请权限，
+      并且清单里的类型必须与 startForeground 传的类型一致，否则直接抛异常。
+
+      为什么用 connectedDevice 而不是 dataSync：Android 15 起 dataSync 有
+      "每 24 小时累计 6 小时"的硬上限，到点系统会强停服务——反连断了对操作员
+      来说就是设备凭空消失。connectedDevice 没有这个时限，语义上也更贴：
+      我们就是在维持一条到外部设备的连接。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      申请忽略电池优化：Android 6+ 的 Doze 会在息屏后冻结 CPU 与网络，即使有前台服务
+      也会把反连掐断（实测息屏 20 分钟后设备就从控制台上"离线"了）。
+      应用内提供入口跳到系统的电池优化白名单设置。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+      Android 11（API 30）起有包可见性限制：不声明就看不到别的应用，
+      `pm list packages` 只会返回自己。安全评估要看装了什么，所以这里申请
+      QUERY_ALL_PACKAGES（侧载工具有此权限，上架 Google Play 需单独申报）。
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:theme="@android:style/Theme.Material">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".BridgeService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+</manifest>
