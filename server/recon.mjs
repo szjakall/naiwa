@@ -15,9 +15,89 @@ import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { readSettings } from "./config.mjs";
+import { appendTimeline, labelPrefixFor, normalizeStatus, vulnLabel } from "./findings-model.mjs";
 import { store } from "./store.mjs";
 
 const activeRuns = new Map();
+
+/** 原始包上限：够看清请求/响应全貌，又不至于把状态文档撑爆（5000 条流水时差 20 倍）。 */
+const RAW_REQUEST_LIMIT = 8 * 1024;
+const RAW_RESPONSE_LIMIT = 24 * 1024;
+
+function clip(text, limit) {
+	const value = String(text ?? "");
+	if (value.length <= limit) return value;
+	return `${value.slice(0, limit)}\n…（已截断，原始长度 ${value.length} 字节）`;
+}
+
+/**
+ * 把请求还原成"能贴进报告/复现"的原始报文。
+ *
+ * 和 `requestHeaders` 那种白名单摘录不同：这里给的是逐字可复现的请求行 + 全部请求头。
+ * 漏洞报告里的"原始数据包"必须能被人照着重放，缺一个 Host 或 Cookie 就不成立了。
+ */
+export function buildRawRequest(url, headers) {
+	let parsed;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return String(url ?? "");
+	}
+	const requestPath = `${parsed.pathname}${parsed.search}` || "/";
+	const lines = [`GET ${requestPath} HTTP/1.1`];
+	const seen = new Set();
+	for (const [name, value] of Object.entries(headers ?? {})) {
+		const key = String(name).toLowerCase();
+		if (key === "host") continue;
+		seen.add(key);
+		lines.push(`${name}: ${Array.isArray(value) ? value.join(", ") : value}`);
+	}
+	if (!seen.has("host")) lines.push(`Host: ${parsed.host}`);
+	return clip(`${lines.join("\r\n")}\r\n\r\n`, RAW_REQUEST_LIMIT);
+}
+
+/** 响应报文：状态行 + 全部响应头 + 正文（按上限截断），空白行与 CRLF 保持原样。 */
+export function buildRawResponse(status, headers, body) {
+	const lines = [`HTTP/1.1 ${status ?? 0} ${STATUS_TEXT[status] ?? ""}`.trimEnd()];
+	for (const [name, value] of Object.entries(headers ?? {})) {
+		lines.push(`${name}: ${Array.isArray(value) ? value.join(", ") : value}`);
+	}
+	const head = `${lines.join("\r\n")}\r\n\r\n`;
+	const text = String(body ?? "");
+	return clip(head + text, RAW_RESPONSE_LIMIT);
+}
+
+const STATUS_TEXT = {
+	200: "OK",
+	201: "Created",
+	204: "No Content",
+	301: "Moved Permanently",
+	302: "Found",
+	304: "Not Modified",
+	307: "Temporary Redirect",
+	308: "Permanent Redirect",
+	400: "Bad Request",
+	401: "Unauthorized",
+	403: "Forbidden",
+	404: "Not Found",
+	405: "Method Not Allowed",
+	500: "Internal Server Error",
+	501: "Not Implemented",
+	502: "Bad Gateway",
+	503: "Service Unavailable",
+};
+
+/** 全部响应头（不再只留白名单里的几个）：抓包视图要看的就是"对方到底回了什么"。 */
+function allHeaders(headers) {
+	const out = {};
+	if (!headers || typeof headers !== "object") return out;
+	for (const [name, value] of Object.entries(headers)) {
+		if (value === undefined) continue;
+		const text = Array.isArray(value) ? value.join(" | ") : String(value);
+		out[name] = text.slice(0, 2000);
+	}
+	return out;
+}
 
 // ---------------------------------------------------------------- HTTP
 
@@ -207,11 +287,14 @@ async function fetchWithRedirects(url, options, task) {
 				ms: response.ms,
 				bytes: response.body ? Buffer.byteLength(response.body) : 0,
 				note: response.headers?.server ?? "",
-				// 业务建模要用到的原始素材：只留摘录，避免把状态文档撑爆。
-				requestHeaders: pickHeaders(options.headers),
-				responseHeaders: pickHeaders(response.headers),
+				// 结构化的头（给表格/筛选用）+ 逐字原始报文（给报告里的"原始数据包"用）
+				requestHeaders: allHeaders({ host: new URL(current).host, ...options.headers }),
+				responseHeaders: allHeaders(response.headers),
 				contentType: String(response.headers?.["content-type"] ?? ""),
 				bodyPreview: previewBody(response.body, String(response.headers?.["content-type"] ?? "")),
+				rawRequest: buildRawRequest(current, { host: new URL(current).host, ...options.headers }),
+				rawResponse: buildRawResponse(response.status, response.headers, response.body),
+				truncated: response.truncated === true,
 			}),
 		);
 		const location = response.headers?.location;
@@ -304,34 +387,59 @@ function upsertAsset(task, asset) {
 
 function addFinding(task, finding) {
 	const state = store.state;
-	// 同一目标同一标题只留一条，避免每次跑任务都灌一堆重复。
+	// 去重口径：同一目标 + 同一标题，且记录还"开着"（待确认/已确认）。
+	// 已确认的老记录再遇到同样问题只累加次数，不重复建条目。
 	const exists = state.findings.find(
-		(entry) => entry.title === finding.title && entry.target === finding.target && entry.status === "open",
+		(entry) =>
+			entry.title === finding.title &&
+			entry.target === finding.target &&
+			normalizeStatus(entry.status) !== "fixed" &&
+			normalizeStatus(entry.status) !== "false-positive",
 	);
 	if (exists) {
 		exists.lastSeen = new Date().toISOString();
 		exists.occurrences = (exists.occurrences ?? 1) + 1;
 		// 后到的公司归属只在原记录没归属时补上，避免同一漏洞在两个客户之间跳。
 		if (!exists.companyId && task?.companyId) exists.companyId = task.companyId;
+		if (!exists.taskId && task?.id) exists.taskId = task.id;
 		store.save();
 		return exists;
 	}
+	// 编号：项目前缀 + 该项目下第几条。删记录会让序号出现空档，这是可接受的——
+	// 报告里的编号一旦发出去就不该被复用。
+	const prefix = labelPrefixFor(task);
+	const number = state.findings.filter((entry) => (entry.taskId ?? null) === (task?.id ?? null)).length + 1;
+	const now = new Date().toISOString();
 	const record = {
 		id: store.nextId("fd"),
+		label: vulnLabel(prefix, number),
 		title: finding.title,
 		severity: finding.severity,
+		// 分数由提交方给（远程判定通常没有，就留空，标"未评分"而不是猜一个）。
+		cvss: Number.isFinite(Number(finding.cvss)) ? Number(finding.cvss) : null,
+		cvssVector: finding.cvssVector ?? "",
+		category: finding.category ?? "",
+		platform: finding.platform ?? task?.platform ?? "web",
+		appPackage: finding.appPackage ?? task?.appPackage ?? "",
+		appVersion: finding.appVersion ?? "",
 		target: finding.target,
 		summary: finding.summary,
+		// 复现过程与原始报文：报告里必须逐字带上，缺了就没法让人复核。
+		repro: finding.repro ?? "",
 		evidence: finding.evidence ?? "",
+		requestPkt: finding.requestPkt ?? "",
+		responsePkt: finding.responsePkt ?? "",
 		recommendation: finding.recommendation ?? "",
+		references: Array.isArray(finding.references) ? finding.references.filter(Boolean).slice(0, 20) : [],
 		source: finding.source ?? "recon",
 		taskId: task?.id ?? null,
 		companyId: task?.companyId ?? null,
 		conversationId: task?.conversationId ?? null,
-		status: "open",
-		createdAt: new Date().toISOString(),
-		lastSeen: new Date().toISOString(),
+		status: "pending",
+		createdAt: now,
+		lastSeen: now,
 		occurrences: 1,
+		timeline: [{ at: now, author: "system", text: `由 ${finding.source === "agent" ? "对话 Agent" : "远程评估"} 提交`, to: "pending" }],
 	};
 	state.findings.push(record);
 	store.save();
@@ -343,6 +451,28 @@ export { addFinding, upsertAsset };
 // ---------------------------------------------------------------- 检查项
 
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+/**
+ * 给一条判定补上"可复核"的三件套：原始请求、原始响应、复现步骤。
+ *
+ * 远程判定天然就握着这两段报文（刚发出去的就是证据），不写进记录等于让人
+ * 只看结论没法复核；报告里的「原始数据包 / 复现步骤」两节就取自这里。
+ */
+function withPacket(finding, entry, category = "配置缺陷") {
+	if (!entry) return { ...finding, category: finding.category ?? category };
+	const steps = [
+		`1. 发起请求：${entry.method} ${entry.url}`,
+		`2. 得到响应：HTTP ${entry.status ?? 0}（响应头与正文见「原始数据包」）`,
+		"3. 结论来自响应中的客观字段（响应头 / 正文 / 证书），不是按版本号猜测。",
+	].join("\n");
+	return {
+		...finding,
+		category: finding.category ?? category,
+		requestPkt: finding.requestPkt ?? entry.rawRequest ?? "",
+		responsePkt: finding.responsePkt ?? entry.rawResponse ?? "",
+		repro: finding.repro ?? steps,
+	};
+}
 
 function checkHeaders(task, url, response) {
 	const headers = response.headers ?? {};
@@ -413,20 +543,54 @@ function checkHeaders(task, url, response) {
 
 /** CORS：反射 Origin 或通配且允许凭据，都是真问题。 */
 async function checkCors(url, options, task) {
-	const response = await fetchOnce(url, { ...options, headers: { ...options.headers, origin: "https://regedit.invalid" } });
+	const corsHeaders = { ...options.headers, origin: "https://regedit.invalid" };
+	const response = await fetchOnce(url, { ...options, headers: corsHeaders });
 	if (response.error) return null;
+	// CORS 是独立的一次请求（带 Origin），单独记一条流量：复现时要能只重放这一条。
+	store.addTraffic(
+		trafficEntry(task, {
+			method: "GET",
+			url,
+			status: response.status ?? 0,
+			ms: response.ms ?? 0,
+			bytes: response.body?.length ?? 0,
+			note: "CORS 探测（Origin: https://regedit.invalid）",
+			requestHeaders: allHeaders({ host: new URL(url).host, ...corsHeaders }),
+			responseHeaders: allHeaders(response.headers),
+			contentType: String(response.headers?.["content-type"] ?? ""),
+			bodyPreview: previewBody(response.body ?? "", String(response.headers?.["content-type"] ?? "")),
+			rawRequest: buildRawRequest(url, { host: new URL(url).host, ...corsHeaders }),
+			rawResponse: buildRawResponse(response.status ?? 0, response.headers, response.body),
+			cors: true,
+		}),
+	);
 	const allowOrigin = response.headers?.["access-control-allow-origin"];
 	const allowCredentials = response.headers?.["access-control-allow-credentials"];
 	if (!allowOrigin) return null;
 	if (allowOrigin === "https://regedit.invalid" || (allowOrigin === "*" && allowCredentials === "true")) {
-		return {
-			severity: allowCredentials === "true" ? "high" : "medium",
-			title: "CORS 允许任意来源",
-			target: url,
-			summary: `Access-Control-Allow-Origin: ${allowOrigin}${allowCredentials === "true" ? "，且允许携带凭据" : ""}`,
-			evidence: `Origin: https://regedit.invalid\nAccess-Control-Allow-Origin: ${allowOrigin}\nAccess-Control-Allow-Credentials: ${allowCredentials ?? "-"}`,
-			recommendation: "用白名单校验 Origin，不要反射请求头；带凭据时禁止使用 *。",
-		};
+		return withPacket(
+			{
+				severity: allowCredentials === "true" ? "high" : "medium",
+				title: "CORS 允许任意来源",
+				target: url,
+				summary: `Access-Control-Allow-Origin: ${allowOrigin}${allowCredentials === "true" ? "，且允许携带凭据" : ""}`,
+				evidence: `Origin: https://regedit.invalid\nAccess-Control-Allow-Origin: ${allowOrigin}\nAccess-Control-Allow-Credentials: ${allowCredentials ?? "-"}`,
+				recommendation: "用白名单校验 Origin，不要反射请求头；带凭据时禁止使用 *。",
+				repro: [
+					"1. 带一个任意 Origin 请求目标接口：`Origin: https://regedit.invalid`",
+					`2. 观察响应头回显：Access-Control-Allow-Origin: ${allowOrigin}${allowCredentials === "true" ? "，并允许凭据" : ""}`,
+					"3. 任意站点即可跨域读取该接口响应（带凭据时为已登录态数据）。",
+				].join("\n"),
+			},
+			{
+				method: "GET",
+				url,
+				status: response.status ?? 0,
+				rawRequest: buildRawRequest(url, { host: new URL(url).host, ...corsHeaders }),
+				rawResponse: buildRawResponse(response.status ?? 0, response.headers, response.body),
+			},
+			"跨域配置",
+		);
 	}
 	return null;
 }
@@ -485,21 +649,34 @@ async function probePaths(task, baseUrl, options) {
 				ms: response.ms ?? 0,
 				bytes: response.body?.length ?? 0,
 				note: `探针 ${probe.path}`,
-				requestHeaders: pickHeaders(options.headers),
-				responseHeaders: pickHeaders(response.headers),
+				requestHeaders: allHeaders({ host: new URL(url).host, ...options.headers }),
+				responseHeaders: allHeaders(response.headers),
 				contentType: String(response.headers?.["content-type"] ?? ""),
 				bodyPreview: previewBody(response.body ?? "", String(response.headers?.["content-type"] ?? "")),
+				rawRequest: buildRawRequest(url, { host: new URL(url).host, ...options.headers }),
+				rawResponse: buildRawResponse(response.status ?? 0, response.headers, response.body),
+				truncated: response.truncated === true,
 				probe: true,
 			}),
 		);
 		if (response.error || response.status !== 200) continue;
 		if (probe.match(response.body ?? "")) {
+			const rawRequest = buildRawRequest(url, { host: new URL(url).host, ...options.headers });
+			const rawResponse = buildRawResponse(response.status, response.headers, response.body);
 			results.push({
 				severity: probe.severity,
 				title: probe.title,
 				target: url,
+				category: "信息泄露",
 				summary: `${url} 直接返回了可判定内容`,
 				evidence: `GET ${url} → 200\n${(response.body ?? "").slice(0, 400)}`,
+				requestPkt: rawRequest,
+				responsePkt: rawResponse,
+				repro: [
+					`1. 直接请求：GET ${url}`,
+					"2. 无需任何认证即返回 200，正文命中该文件的特征内容（见「原始数据包」）。",
+					"3. 命中即停：只取能证明结论的最小片段，未下载整库、未进一步利用。",
+				].join("\n"),
 				recommendation: probe.recommendation,
 			});
 		}
@@ -527,7 +704,7 @@ export function normalizeTarget(input) {
 	}
 }
 
-export function createTask({ title, scope, companyId = null, conversationId = null }) {
+export function createTask({ title, scope, companyId = null, conversationId = null, platform = "web", appPackage = "" }) {
 	const targets = String(scope ?? "")
 		.split(/[\s,]+/)
 		.map((line) => line.trim())
@@ -536,13 +713,17 @@ export function createTask({ title, scope, companyId = null, conversationId = nu
 		.filter(Boolean);
 	const settings = readSettings().recon;
 	const limited = targets.slice(0, settings.maxTargets);
+	const isMobile = platform === "android";
 	const task = {
 		id: store.nextId("tk"),
 		title: String(title || "").trim() || `评估任务 ${new Date().toLocaleString("zh-CN")}`,
 		scope: limited.map((target) => target.input),
 		targets: limited,
+		// 项目形态：web 走只读 GET 侦察；android 是"移动端评估"，目标是 App/设备，没有可 GET 的站点。
+		platform: isMobile ? "android" : "web",
+		appPackage: String(appPackage ?? "").trim(),
 		status: "queued",
-		stage: "待命",
+		stage: isMobile ? "移动端项目" : "待命",
 		// 项目归属：公司决定交付给谁，会话决定这个项目是从哪次对话长出来的。
 		// 两个字段一路带到资产、发现与流量，界面才能按公司/会话把数据串起来。
 		companyId: companyId || null,
@@ -558,8 +739,8 @@ export function createTask({ title, scope, companyId = null, conversationId = nu
 			.filter(Boolean).length - limited.length,
 	};
 	// 没有可识别目标时不要入库：调用方会回 400，落一条空任务只会让列表变脏。
-	// （这里踩过坑：先入库后校验，被拒绝的请求在 state.json 里留下了孤儿任务。）
-	if (limited.length > 0) {
+	// 移动端项目例外：它的"目标"是 App/设备，本来就没有域名可解析。
+	if (limited.length > 0 || isMobile) {
 		store.state.tasks.unshift(task);
 		store.save();
 	}
@@ -599,6 +780,22 @@ export function isRunning(taskId) {
 }
 
 async function runTask(task) {
+	// 移动端项目没有站点可抓：它的证据来自设备（截屏、logcat、抓包）与 APK 分析。
+	// 这里直接收尾并把状态说清楚，避免操作员看到"运行中"其实一条请求都发不出去。
+	if (task.platform === "android") {
+		task.status = "done";
+		task.stage = "移动端项目：等待设备取证";
+		task.startedAt = task.startedAt ?? new Date().toISOString();
+		task.finishedAt = new Date().toISOString();
+		task.summary = task.appPackage ? `安卓 App：${task.appPackage}` : "安卓 App 评估";
+		store.pushTaskEvent(
+			task,
+			"info",
+			`移动端项目${task.appPackage ? `（${task.appPackage}）` : ""}：不做站点侦察；用对话里的设备工具取证，或在「安卓设备 → APK 分析」出静态结论。`,
+		);
+		store.save();
+		return;
+	}
 	const settings = readSettings().recon;
 	const options = {
 		timeoutMs: settings.timeoutMs,
@@ -692,33 +889,49 @@ async function runTask(task) {
 		task.stats.assets = store.state.assets.filter((asset) => asset.taskId === task.id).length;
 
 		// 4) 判定
+		// 每条判定都要能复核：把这一跳的原始报文挂上去（checkHeaders 是纯函数，不碰流量表）。
+		const hopTraffic = [...(store.state.traffic ?? [])].reverse().find((item) => item.url === finalUrl && item.kind === "http");
 		const findings = [];
-		findings.push(...checkHeaders(task, finalUrl, response));
+		for (const finding of checkHeaders(task, finalUrl, response)) findings.push(withPacket(finding, hopTraffic));
 		const corsFinding = await checkCors(finalUrl, options, task);
 		if (corsFinding) findings.push(corsFinding);
 
 		if (finalUrl.startsWith("http://")) {
-			findings.push({
-				severity: "medium",
-				title: "站点以明文 HTTP 提供服务",
-				target: finalUrl,
-				summary: "未跳转到 HTTPS",
-				evidence: `GET ${target.baseUrl} → ${response.status}，最终地址 ${finalUrl}`,
-				recommendation: "全站 301 到 HTTPS，并补 HSTS。",
-			});
+			findings.push(
+				withPacket(
+					{
+						severity: "medium",
+						title: "站点以明文 HTTP 提供服务",
+						target: finalUrl,
+						summary: "未跳转到 HTTPS",
+						evidence: `GET ${target.baseUrl} → ${response.status}，最终地址 ${finalUrl}`,
+						recommendation: "全站 301 到 HTTPS，并补 HSTS。",
+						repro: `1. 访问 http:// 地址：${finalUrl}\n2. 服务器直接 200 返回内容，没有 301 到 HTTPS。\n3. 中间链路上的任意一跳都能读到明文请求与响应。`,
+					},
+					hopTraffic,
+					"传输安全",
+				),
+			);
 		}
 
 		if (response.tls) {
 			const expiry = Date.parse(response.tls.validTo);
 			if (Number.isFinite(expiry) && expiry < Date.now()) {
-				findings.push({
-					severity: "medium",
-					title: "TLS 证书已过期",
-					target: finalUrl,
-					summary: `证书有效期至 ${response.tls.validTo}`,
-					evidence: JSON.stringify(response.tls, null, 2),
-					recommendation: "更换证书，并建立到期提醒。",
-				});
+				findings.push(
+					withPacket(
+						{
+							severity: "medium",
+							title: "TLS 证书已过期",
+							target: finalUrl,
+							summary: `证书有效期至 ${response.tls.validTo}`,
+							evidence: JSON.stringify(response.tls, null, 2),
+							recommendation: "更换证书，并建立到期提醒。",
+							repro: `1. 建立 TLS 连接：${finalUrl}\n2. 读取证书有效期：${response.tls.validTo}（已早于当前时间）。\n3. 浏览器会给出证书过期告警，用户习惯性忽略后即进入"看似安全"的连接。`,
+							category: "传输安全",
+						},
+						hopTraffic,
+					),
+				);
 			}
 		}
 

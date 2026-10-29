@@ -74,6 +74,7 @@ async function renderList(root, ctx) {
 							<tr>
 								<th>任务</th>
 								<th class="nowrap">状态</th>
+								<th class="nowrap">形态</th>
 								<th class="nowrap">公司</th>
 								<th class="nowrap">目标</th>
 								<th class="nowrap">资产</th>
@@ -91,6 +92,11 @@ async function renderList(root, ctx) {
 										<div class="tiny muted break">${(task.scope ?? []).join("，") || "无目标"}</div>
 									</td>
 									<td>${statusChip(task.status)}</td>
+									<td class="nowrap tiny">
+										${(task.platform ?? "web") === "android"
+											? html`<span class="chip chip-info">安卓</span>${task.appPackage ? html`<div class="mono tiny muted">${task.appPackage}</div>` : ""}`
+											: html`<span class="chip chip-muted">Web</span>`}
+									</td>
 									<td class="nowrap tiny">
 										${task.companyId
 											? html`<a class="link" href="#/tasks?companyId=${task.companyId}">${companyName(task.companyId) || task.companyId}</a>`
@@ -220,6 +226,18 @@ function openCreateDialog(ctx, companies = []) {
 				<input data-title placeholder="例如：官网门户 授权评估" />
 			</label>
 			<label class="field">
+				<span>项目形态</span>
+				<select data-platform>
+					<option value="web">Web 站点评估</option>
+					<option value="android">安卓 App 评估</option>
+				</select>
+				<span class="hint">移动端项目不发站点侦察：靠设备取证与 APK 静态分析，漏洞带包名/版本。</span>
+			</label>
+			<label class="field" data-pkg-field style="display:none">
+				<span>App 包名（可选）</span>
+				<input data-package placeholder="com.example.app" />
+			</label>
+			<label class="field">
 				<span>归属公司（可选）</span>
 				<select data-company>
 					<option value="">未归属</option>
@@ -231,7 +249,7 @@ function openCreateDialog(ctx, companies = []) {
 				<textarea data-scope rows="6" placeholder="https://example.com&#10;example.org:8443"></textarea>
 				<span class="hint">
 					每行一个域名或 URL（最多 32 个）。引擎只发只读 GET：抓首屏、读响应头、TLS 与几个通用暴露点，
-					不扫描端口、不猜口令、不爆破路径。
+					不扫描端口、不猜口令、不爆破路径。移动端项目可留空。
 				</span>
 			</label>
 			<label class="checkbox"><input type="checkbox" data-autorun checked /><span>创建后立即运行</span></label>
@@ -243,17 +261,26 @@ function openCreateDialog(ctx, companies = []) {
 	`);
 
 	overlay.panel.querySelector("[data-title]").focus();
+	const platformSelect = overlay.panel.querySelector("[data-platform]");
+	platformSelect.addEventListener("change", () => {
+		const android = platformSelect.value === "android";
+		overlay.panel.querySelector("[data-pkg-field]").style.display = android ? "" : "none";
+		overlay.panel.querySelector("[data-scope]").closest(".field").style.display = android ? "none" : "";
+	});
 	const submit = async () => {
 		const title = overlay.panel.querySelector("[data-title]").value.trim();
 		const scope = overlay.panel.querySelector("[data-scope]").value;
 		const companyId = overlay.panel.querySelector("[data-company]").value;
+		const platform = platformSelect.value;
+		const appPackage = overlay.panel.querySelector("[data-package]").value.trim();
 		const autorun = overlay.panel.querySelector("[data-autorun]").checked;
-		if (!scope.trim()) return toast("至少填一个目标", "error");
+		if (platform !== "android" && !scope.trim()) return toast("至少填一个目标", "error");
+		if (platform === "android" && !appPackage && !title) return toast("移动端项目需要一个名称或包名", "error");
 		const button = overlay.panel.querySelector("[data-create]");
 		button.disabled = true;
 		button.textContent = "创建中…";
 		try {
-			const result = await api.post("/api/tasks", { title, scope, companyId, autorun });
+			const result = await api.post("/api/tasks", { title, scope, companyId, autorun, platform, appPackage });
 			overlay.close();
 			if (result.pending) toast("任务已创建，已进入审批队列：到「守门」页批准后开始执行", "info", 6000);
 			else if (result.blocked) toast(result.error ?? "守门员拦截了这次任务", "error", 6000);
@@ -368,6 +395,9 @@ async function renderDetail(root, ctx, id) {
 						</select>
 					</span>
 					<span>来源 ${conversation ? html`<a class="link" href="#/chat/${conversation.id}">${conversation.title}</a>` : "控制台"}</span>
+					${(task.platform ?? "web") === "android"
+						? html`<span>形态 <span class="chip chip-info">安卓</span>${task.appPackage ? html` <span class="mono">${task.appPackage}</span>` : ""}</span>`
+						: html`<span>形态 <span class="chip chip-muted">Web</span></span>`}
 					<span>${(task.scope ?? []).length} 个目标</span>
 					<a class="link" href="#/traffic?taskId=${task.id}">本项目流量 ${traffic.length} 条</a>
 					<span class="row" style="gap:6px">

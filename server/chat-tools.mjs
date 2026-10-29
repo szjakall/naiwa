@@ -17,11 +17,20 @@ import { ARTIFACT_DIR } from "./config.mjs";
 import { gateway } from "./droid.mjs";
 import { guard } from "./gatekeeper.mjs";
 import { addFinding, createTask, normalizeTarget, trafficEntry } from "./recon.mjs";
+import { isOpen } from "./findings-model.mjs";
 import { generateReport } from "./reports.mjs";
 import { store } from "./store.mjs";
 import { isEnabled } from "./tools.mjs";
 
 const MAX_RESULT_CHARS = 4000;
+
+/** 子域枚举的默认前缀表：够覆盖绝大多数资产，又不至于把 DNS 打爆。 */
+const COMMON_SUBDOMAINS = [
+	"www", "m", "api", "open", "openapi", "admin", "portal", "app", "wap", "h5",
+	"static", "cdn", "img", "file", "upload", "download", "mail", "smtp", "ns1", "ns2",
+	"dev", "test", "uat", "staging", "beta", "demo", "vpn", "oa", "sso", "auth",
+	"login", "pay", "gw", "gateway", "monitor", "status", "docs", "wiki", "git", "jenkins",
+];
 
 function trim(text) {
 	const value = typeof text === "string" ? text : JSON.stringify(text, null, 2);
@@ -183,20 +192,53 @@ export const CHAT_TOOLS = [
 		function: {
 			name: "record_finding",
 			description:
-				"把一条**已确认**的漏洞落库（进发现页 / 报告）。只在有真实证据时用；仅凭版本号猜测的不要记。每个漏洞调用一次。",
+				"把一条**已确认**的漏洞落库（进漏洞页 / 报告）。只在有真实证据时用；仅凭版本号猜测的不要记。每个漏洞调用一次。复现步骤与原始请求/响应包是报告的必需内容，尽量都填。",
 			parameters: {
 				type: "object",
 				properties: {
 					title: { type: "string", description: "漏洞名/类型，如「未授权访问 Actuator env」" },
-					severity: { type: "string", description: "critical / high / medium / low" },
+					severity: { type: "string", description: "critical / high / medium / low / info" },
 					target: { type: "string", description: "受影响目标（域名或 URL）" },
-					summary: { type: "string", description: "一句话说明影响" },
-					evidence: { type: "string", description: "真实证据原文：请求/响应片段、命令输出，不要改写" },
-					recommendation: { type: "string", description: "修复建议" },
+					summary: { type: "string", description: "漏洞详情：入口、参数、版本、影响（1-3 句）" },
+					repro: {
+						type: "string",
+						description: "复现步骤，编号逐条写：怎么请求、看什么回显、为什么能判定。报告会逐字引用。",
+					},
+					requestPkt: { type: "string", description: "原始请求报文（完整请求行 + 所有请求头 + body），逐字贴" },
+					responsePkt: { type: "string", description: "原始响应报文（状态行 + 响应头 + 关键正文），逐字贴" },
+					evidence: { type: "string", description: "证据原文（可与原始包重复，用于快速浏览）" },
+					recommendation: { type: "string", description: "修复建议（可执行）" },
+					references: { type: "array", items: { type: "string" }, description: "参考链接（CVE、厂商文档）" },
+					category: { type: "string", description: "类型，如 SQL 注入 / 越权 / 信息泄露" },
+					cvss: { type: "number", description: "CVSS 3.1 基础分 0-10；不确定就不传（会标未评分）" },
+					cvssVector: { type: "string", description: "CVSS 向量串，如 AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" },
+					platform: { type: "string", description: "web / android，默认 web" },
+					appPackage: { type: "string", description: "安卓漏洞的包名" },
+					appVersion: { type: "string", description: "安卓漏洞的版本" },
 					taskId: { type: "string", description: "关联任务 id（可选）" },
 					assetId: { type: "string", description: "关联资产 id（可选）" },
 				},
 				required: ["title", "severity", "target", "summary"],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "enumerate_subdomains",
+			description:
+				"子域枚举：给一个域名，按内置常见前缀（可追加自定义）批量做 A 记录解析，一次返回命中的子域表。要枚举子域时用它，不要一个个调 dns_lookup。",
+			parameters: {
+				type: "object",
+				properties: {
+					domain: { type: "string", description: "主域，如 example.com" },
+					prefixes: {
+						type: "array",
+						items: { type: "string" },
+						description: "可选：追加/覆盖的前缀清单（最多 40 个，如 www、api、admin）",
+					},
+				},
+				required: ["domain"],
 			},
 		},
 	},
@@ -357,7 +399,7 @@ function saveArtifact(prefix, ext, bytes) {
 export async function runChatTool(name, args = {}, ctx = {}) {
 	switch (name) {
 		case "project_overview": {
-			const open = (store.state.findings ?? []).filter((f) => f.status !== "closed");
+			const open = (store.state.findings ?? []).filter((f) => isOpen(f));
 			const bySeverity = {};
 			for (const f of open) bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
 			const task = ctx.taskId ? (store.state.tasks ?? []).find((t) => t.id === ctx.taskId) : null;
@@ -404,7 +446,7 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 		}
 		case "list_findings": {
 			const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
-			let items = (store.state.findings ?? []).filter((f) => f.status !== "closed");
+			let items = (store.state.findings ?? []).filter((f) => isOpen(f));
 			if (args.severity) items = items.filter((f) => f.severity === args.severity);
 			if (args.status) items = items.filter((f) => f.status === args.status);
 			if (args.taskId) items = items.filter((f) => f.taskId === args.taskId);
@@ -437,6 +479,9 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 						ms,
 						bytes: raw.length,
 						note: raw.trim() ? "对话 Agent" : "无返回",
+						// 原始响应原样留一份：报告里的「原始数据包」就靠它，别只剩一个字节数。
+						rawRequest: `WHOIS ${domain} @ ${server}:43\r\n`,
+						rawResponse: raw.slice(0, 16 * 1024),
 					}),
 				);
 				if (!raw.trim()) return { ok: false, summary: `${server} 没有返回内容` };
@@ -488,6 +533,8 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 						ms: Date.now() - started,
 						bytes: JSON.stringify(value).length,
 						note: "对话 Agent",
+						rawRequest: `${record} ${target}\r\n`,
+						rawResponse: JSON.stringify(value, null, 2).slice(0, 8 * 1024),
 					}),
 				);
 				return { ok: true, summary: trim(`${record} ${target}\n${JSON.stringify(value, null, 2)}`), data: { target, record, value } };
@@ -501,10 +548,67 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 						ms: Date.now() - started,
 						bytes: 0,
 						note: `${error.code ?? error.message}`,
+						rawRequest: `${record} ${target}\r\n`,
+						rawResponse: `;; 查询失败：${error.code ?? error.message}`,
 					}),
 				);
 				return { ok: false, summary: `${record} 查询失败：${error.code ?? error.message}` };
 			}
+		}
+		case "enumerate_subdomains": {
+			const domain = String(args.domain ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+			if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return { ok: false, summary: `域名不合法：${domain}` };
+			const custom = Array.isArray(args.prefixes) ? args.prefixes.map((item) => String(item).trim()).filter(Boolean) : [];
+			// 默认表就是常见前缀；上限 40 个候选，一次并发解析，**一个工具调用**出结果。
+			// 之前模型用 30 次 dns_lookup 一个个查，把工具轮次全烧光、最后没力气给结论。
+			const prefixes = (custom.length ? custom : [...COMMON_SUBDOMAINS]).slice(0, 40);
+			const started = Date.now();
+			const hits = [];
+			for (let i = 0; i < prefixes.length; i += 12) {
+				const slice = prefixes.slice(i, i + 12);
+				// biome-ignore lint/performance/noAwaitInLoops: 分批并发，避免一次性打爆解析器
+				const settled = await Promise.all(
+					slice.map(async (prefix) => {
+						const host = `${prefix}.${domain}`;
+						try {
+							const ips = await Promise.race([
+								resolve4(host),
+								new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000)),
+							]);
+							return { host, ips: Array.isArray(ips) ? ips : [] };
+						} catch {
+							return null;
+						}
+					}),
+				);
+				for (const item of settled) if (item) hits.push(item);
+			}
+			const ms = Date.now() - started;
+			store.addTraffic(
+				trafficEntry(ctxTask(ctx), {
+					kind: "dns",
+					method: "ENUM",
+					url: `dns://${domain}/*`,
+					status: 200,
+					ms,
+					bytes: 0,
+					note: `子域枚举：${prefixes.length} 个候选，命中 ${hits.length} 个`,
+					rawRequest: `DNS A × ${prefixes.length}：${prefixes.join(", ")}\r\n`,
+					rawResponse: hits.map((item) => `${item.host} -> ${item.ips.join(", ")}`).join("\r\n") || "(无命中)",
+				}),
+			);
+			if (!hits.length) {
+				return { ok: true, summary: `枚举 ${prefixes.length} 个候选，${domain} 没有命中的子域（耗时 ${ms}ms）。可以给 prefixes 换一批更针对性的名字。`, data: { domain, tried: prefixes.length, hits: [] } };
+			}
+			return {
+				ok: true,
+				summary: trim(
+					`${domain} 子域命中 ${hits.length}/${prefixes.length}（${ms}ms）：\n${hits
+						.map((item) => `${item.host}\t${item.ips.join(",")}`)
+						.join("\n")}\n需要逐个做暴露面时，用 create_recon_task 一次性带上这些主机。`,
+				),
+				data: { domain, tried: prefixes.length, hits },
+			};
 		}
 		case "create_recon_task": {
 			const title = String(args.title ?? "").trim() || "对话发起的侦察";
@@ -603,15 +707,28 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 			const title = String(args.title ?? "").trim();
 			const target = String(args.target ?? "").trim();
 			if (!title || !target) return { ok: false, summary: "title 与 target 必填" };
-			const severity = ["critical", "high", "medium", "low"].includes(args.severity) ? args.severity : "medium";
-			// 与任务引擎共用 addFinding：同标题同目标自动去重，只累加 occurrences
-			const record = addFinding(null, {
+			const severity = ["critical", "high", "medium", "low", "info"].includes(args.severity) ? args.severity : "medium";
+			// 与任务引擎共用 addFinding：同标题同目标自动去重，只累加 occurrences。
+			// 复现过程、原始请求/响应包、CVSS、参考链接都要带上——报告要能让人照着复现。
+			// 传入会话绑定的任务，编号才会用项目前缀（EXAMPLE-0007）而不是 VULN-0007。
+			const boundTask = ctx.taskId ? (store.state.tasks ?? []).find((entry) => entry.id === ctx.taskId) ?? null : null;
+			const record = addFinding(boundTask, {
 				title,
 				severity,
 				target,
 				summary: String(args.summary ?? "").trim(),
+				repro: String(args.repro ?? "").trim(),
 				evidence: String(args.evidence ?? "").trim(),
+				requestPkt: String(args.requestPkt ?? "").trim(),
+				responsePkt: String(args.responsePkt ?? "").trim(),
 				recommendation: String(args.recommendation ?? "").trim(),
+				references: Array.isArray(args.references) ? args.references.map((item) => String(item)) : [],
+				category: String(args.category ?? "").trim(),
+				cvss: args.cvss === undefined || args.cvss === null || args.cvss === "" ? null : Number(args.cvss),
+				cvssVector: String(args.cvssVector ?? "").trim(),
+				platform: args.platform === "android" ? "android" : ctx.platform === "android" ? "android" : "web",
+				appPackage: String(args.appPackage ?? ctx.appPackage ?? "").trim(),
+				appVersion: String(args.appVersion ?? "").trim(),
 				source: "agent",
 			});
 			// addFinding 只认 task，这里补上 taskId/assetId
@@ -622,10 +739,11 @@ export async function runChatTool(name, args = {}, ctx = {}) {
 			if (!record.taskId && ctx.taskId) record.taskId = ctx.taskId;
 			if (!record.conversationId && ctx.conversationId) record.conversationId = ctx.conversationId;
 			store.save();
+			const scored = Number.isFinite(Number(record.cvss)) && Number(record.cvss) > 0 ? ` · CVSS ${Number(record.cvss).toFixed(1)}` : " · CVSS 未评分";
 			return {
 				ok: true,
-				summary: `已落库 ${record.id}：${title}（${severity}）@ ${target}${record.occurrences > 1 ? `，第 ${record.occurrences} 次出现` : ""}`,
-				data: { id: record.id, occurrences: record.occurrences },
+				summary: `已落库 ${record.label ?? record.id}：${title}（${severity}${scored}）@ ${target}${record.occurrences > 1 ? `，第 ${record.occurrences} 次出现` : ""}${record.repro ? "；已含复现步骤" : "；**缺复现步骤**，建议补上"}`,
+				data: { id: record.id, label: record.label, occurrences: record.occurrences, cvss: record.cvss },
 			};
 		}
 		case "generate_report": {

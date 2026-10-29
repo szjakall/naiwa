@@ -8,7 +8,7 @@
  */
 
 import { icon } from "../icons.js";
-import { api, fmtBytes, fmtClock, fmtDuration, html, mount, raw, toast, toNode } from "../core.js";
+import { api, copyText, fmtBytes, fmtClock, fmtDuration, html, mount, raw, toast, toNode } from "../core.js";
 import { card, emptyState, inlineError, loading } from "../ui.js";
 
 const KINDS = [
@@ -29,15 +29,33 @@ function statusTone(status) {
 	return "chip-danger";
 }
 
-function headerRows(headers) {
-	const entries = Object.entries(headers ?? {});
-	if (!entries.length) return html`<div class="muted tiny">（未记录）</div>`;
-	return html`<div class="kv">
-		${entries.map(
-			([name, value]) => html`<div class="kv-k mono tiny">${name}</div>
-				<div class="kv-v tiny break">${value}</div>`,
-		)}
-	</div>`;
+/**
+ * 请求包 / 响应包：优先用服务端逐字记录的原始报文；老记录（1.1 之前只存了白名单头）
+ * 用结构化字段拼一份"接近原始"的版本，至少能看出请求行、头和正文，不留空白。
+ */
+function rawRequestOf(item) {
+	if (item.rawRequest) return item.rawRequest;
+	const headers = item.requestHeaders;
+	if (!headers || !Object.keys(headers).length) return "";
+	const lines = [`${item.method ?? "GET"} ${item.url ?? "/"} HTTP/1.1`];
+	for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+	return lines.join("\r\n");
+}
+
+function rawResponseOf(item) {
+	if (item.rawResponse) return item.rawResponse;
+	const headers = item.responseHeaders;
+	const lines = [`HTTP/1.1 ${item.status || 0}`];
+	if (headers) for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+	const body = item.bodyPreview ?? "";
+	return body ? `${lines.join("\r\n")}\r\n\r\n${body}` : lines.join("\r\n");
+}
+
+/** 设备抓包这类没有 HTTP 语义的记录，用 note 拼一条可读的"包"。 */
+function devicePacket(item) {
+	if (item.kind === "dns") return item.rawResponse ?? item.note ?? "";
+	if (item.kind === "whois") return item.rawResponse ?? item.note ?? "";
+	return item.rawResponse ?? item.note ?? "";
 }
 
 export default {
@@ -187,21 +205,26 @@ export default {
 																<span>${item.note || "—"}</span>
 																${item.contentType ? html`<span>${item.contentType}</span>` : ""}
 																${item.conversationId ? html`<a class="link" href="#/chat/${item.conversationId}">来源会话</a>` : ""}
+																<span class="spacer"></span>
+																<button class="btn ghost small" data-copy="${item.id}" data-which="request">复制请求包</button>
+																<button class="btn ghost small" data-copy="${item.id}" data-which="response">复制响应包</button>
 															</div>
-															<div class="traffic-cols">
-																<div>
-																	<div class="traffic-cap">请求头</div>
-																	${headerRows(item.requestHeaders)}
-																</div>
-																<div>
-																	<div class="traffic-cap">响应头</div>
-																	${headerRows(item.responseHeaders)}
-																</div>
-															</div>
-															${item.bodyPreview
-																? html`<div class="traffic-cap mt-12">正文摘录</div>
-																		<pre class="traffic-body tiny">${item.bodyPreview}</pre>`
-																: html`<div class="tiny muted mt-12">这类记录没有正文（${KIND_LABEL[item.kind ?? "http"] ?? "HTTP"}）。</div>`}
+															${(item.kind ?? "http") === "http"
+																? html`<div class="traffic-cols">
+																		<div>
+																			<div class="traffic-cap">请求包</div>
+																			<pre class="traffic-body tiny" data-pkt-req="${item.id}">${rawRequestOf(item) || "（未记录请求报文）"}</pre>
+																		</div>
+																		<div>
+																			<div class="traffic-cap">响应包</div>
+																			<pre class="traffic-body tiny" data-pkt-res="${item.id}">${rawResponseOf(item) || "（未记录响应报文）"}</pre>
+																		</div>
+																	</div>`
+																: html`<div>
+																		<div class="traffic-cap">${KIND_LABEL[item.kind ?? "http"] ?? item.kind} 原始记录</div>
+																		<pre class="traffic-body tiny" data-pkt-res="${item.id}">${devicePacket(item) || "（未记录内容）"}</pre>
+																	</div>`}
+															${item.truncated ? html`<div class="tiny muted mt-8">正文超过采集上限，已截断。</div>` : ""}
 														</div>
 													</td>
 												</tr>`
@@ -270,6 +293,23 @@ export default {
 					if (expanded.has(id)) expanded.delete(id);
 					else expanded.add(id);
 					paint();
+				}),
+			);
+			// 复制单条包的请求/响应：报告里贴证据时最常用的动作。
+			root.querySelectorAll("[data-copy]").forEach((node) =>
+				node.addEventListener("click", async (event) => {
+					event.stopPropagation();
+					const item = items.find((entry) => entry.id === node.dataset.copy);
+					if (!item) return;
+					const text =
+						node.dataset.which === "request"
+							? rawRequestOf(item)
+							: rawResponseOf(item) || devicePacket(item);
+					if (!text) {
+						toast("这条记录没有对应的报文", "info");
+						return;
+					}
+					await copyText(text);
 				}),
 			);
 			const copy = root.querySelector("#copy");

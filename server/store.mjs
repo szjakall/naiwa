@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { STATE_FILE } from "./config.mjs";
+import { migrateFindings } from "./findings-model.mjs";
 
 const LIMITS = {
 	logs: 3000,
@@ -108,6 +109,8 @@ export class Store {
 
 	constructor() {
 		this.state = existsSync(STATE_FILE) ? normalize(this.#load()) : emptyState();
+		// 老状态的漏洞记录缺编号/CVSS/时间线，启动时补齐一次；有改动就落盘。
+		if (migrateFindings(this.state)) this.save();
 	}
 
 	#load() {

@@ -27,6 +27,7 @@ import {
 import { readJson, readRaw, sendError, sendJson, sendText } from "./http.mjs";
 import { analyzeApk } from "./apk.mjs";
 import { createTask, isRunning, startTask, stopTask, trafficEntry } from "./recon.mjs";
+import { appendTimeline, isOpen, isSeverityMismatch, normalizeStatus } from "./findings-model.mjs";
 import { generateReport } from "./reports.mjs";
 import { listSkills, readSkill } from "./skills.mjs";
 import {
@@ -258,7 +259,7 @@ on(
 							tasks: store.state.tasks.length,
 							running: store.state.tasks.filter((task) => task.status === "running").length,
 							assets: store.state.assets.length,
-							findings: store.state.findings.filter((finding) => finding.status === "open").length,
+							findings: store.state.findings.filter((finding) => isOpen(finding)).length,
 							devices: store.state.droid.devices.length,
 							pending: decisionStats().pending,
 							traffic: (store.state.traffic ?? []).length,
@@ -334,7 +335,7 @@ on("POST", "/api/auth/password", async ({ req, res, session }) => {
 
 on("GET", "/api/overview", async ({ res }) => {
 	const state = store.state;
-	const open = state.findings.filter((finding) => finding.status === "open");
+	const open = state.findings.filter((finding) => isOpen(finding));
 	const bySeverity = open.reduce((acc, finding) => {
 		acc[finding.severity] = (acc[finding.severity] ?? 0) + 1;
 		return acc;
@@ -378,14 +379,21 @@ on("GET", "/api/tasks", async ({ res }) => {
 
 on("POST", "/api/tasks", async ({ req, res }) => {
 	const body = await readJson(req);
+	const platform = body.platform === "android" ? "android" : "web";
 	const task = createTask({
 		title: body.title,
 		scope: body.scope,
 		companyId: body.companyId ?? null,
 		conversationId: body.conversationId ?? null,
+		platform,
+		appPackage: body.appPackage ?? "",
 	});
-	if (task.targets.length === 0) return sendError(res, 400, "范围内没有可识别的目标（需要域名或 URL）");
-	store.log("info", `创建任务：${task.title}（${task.targets.length} 个目标）`);
+	// 站点项目必须有目标；移动端项目的目标是 App/设备，允许空范围。
+	if (platform !== "android" && task.targets.length === 0) return sendError(res, 400, "范围内没有可识别的目标（需要域名或 URL）");
+	if (platform === "android" && !task.appPackage && !String(body.title ?? "").trim()) {
+		return sendError(res, 400, "移动端项目需要一个名称或包名");
+	}
+	store.log("info", `创建${platform === "android" ? "移动端" : ""}项目：${task.title}（${task.targets.length} 个目标）`);
 	if (body.autorun !== false) {
 		// 任务引擎默认不守门（每个 GET 都判定会把一次侦察拖成几十次模型往返）；
 		// 打开「任务引擎」这一类后，按"一次任务一次判定"处理。
@@ -519,17 +527,61 @@ on("DELETE", "/api/assets/:id", async ({ res, params }) => {
 	sendJson(res, 200, { ok: true });
 });
 
-on("GET", "/api/findings", async ({ res }) => {
-	sendJson(res, 200, store.state.findings);
+on("GET", "/api/findings", async ({ res, query }) => {
+	let items = store.state.findings ?? [];
+	const taskId = query.get("taskId");
+	const companyId = query.get("companyId");
+	const platform = query.get("platform");
+	const status = query.get("status");
+	if (taskId) items = items.filter((finding) => finding.taskId === taskId);
+	if (companyId) items = items.filter((finding) => finding.companyId === companyId);
+	if (platform && platform !== "all") items = items.filter((finding) => (finding.platform ?? "web") === platform);
+	if (status && status !== "all") items = items.filter((finding) => normalizeStatus(finding.status) === status);
+	sendJson(res, 200, items);
 });
 
 on("PATCH", "/api/findings/:id", async ({ req, res, params }) => {
 	const finding = store.state.findings.find((entry) => entry.id === params.id);
 	if (!finding) return sendError(res, 404, "发现不存在");
 	const body = await readJson(req);
-	if (body.status) finding.status = String(body.status);
+	const before = normalizeStatus(finding.status);
+	// 状态流转：只认四态（pending / confirmed / false-positive / fixed），旧写法自动映射。
+	// 每次流转写进处理时间线，报告末尾按时间还原，谁改的、为什么改都留得住。
+	if (body.status !== undefined) {
+		const next = normalizeStatus(body.status);
+		if (next !== before) {
+			appendTimeline(finding, {
+				author: "operator",
+				text: body.note ? String(body.note).slice(0, 500) : "状态变更",
+				from: before,
+				to: next,
+			});
+		}
+		finding.status = next;
+	}
 	if (body.severity) finding.severity = String(body.severity);
-	if (body.note) finding.notes = [...(finding.notes ?? []), { at: new Date().toISOString(), text: String(body.note) }];
+	// CVSS 与向量：运营者可以给"未评分"的远程判定补分；等级不一致会在报告里标出来。
+	if (body.cvss !== undefined) {
+		const score = Number(body.cvss);
+		finding.cvss = body.cvss === null || body.cvss === "" || !Number.isFinite(score) ? null : Math.min(Math.max(score, 0), 10);
+	}
+	if (body.cvssVector !== undefined) finding.cvssVector = String(body.cvssVector ?? "").slice(0, 200);
+	// 复现材料可以事后补：操作员拿到更完整的包，直接贴进来覆盖。
+	for (const key of ["repro", "requestPkt", "responsePkt", "recommendation", "category", "appPackage", "appVersion", "title"]) {
+		if (body[key] !== undefined) finding[key] = String(body[key] ?? "").slice(0, key.endsWith("Pkt") ? 24 * 1024 : 8000);
+	}
+	if (body.references !== undefined) {
+		finding.references = Array.isArray(body.references)
+			? body.references.map((item) => String(item).slice(0, 300)).filter(Boolean).slice(0, 20)
+			: [];
+	}
+	if (body.note) {
+		finding.notes = [...(finding.notes ?? []), { at: new Date().toISOString(), text: String(body.note).slice(0, 2000) }];
+		appendTimeline(finding, { author: "operator", text: String(body.note).slice(0, 500) });
+	}
+	if (body.status === undefined && body.severity && body.note) {
+		appendTimeline(finding, { author: "operator", text: `等级调整为 ${body.severity}` });
+	}
 	store.save();
 	sendJson(res, 200, finding);
 });
@@ -1724,6 +1776,8 @@ on("GET", "/api/chat/:id", async ({ res, params }) => {
 					title: task.title,
 					status: task.status,
 					stage: task.stage,
+					platform: task.platform ?? "web",
+					appPackage: task.appPackage ?? "",
 					running: isRunning(task.id),
 					scope: task.scope ?? [],
 					stats: task.stats ?? {},
@@ -1751,11 +1805,12 @@ on("POST", "/api/chat/:id/messages", async ({ req, res, params }) => {
 on("PATCH", "/api/chat/:id", async ({ req, res, params }) => {
 	const body = await readJson(req);
 	// 项目/设备/公司绑定走 patchConversation；其余字段维持原来的单分支语义。
-	if (body.taskId !== undefined || body.deviceId !== undefined || body.companyId !== undefined) {
+	if (body.taskId !== undefined || body.deviceId !== undefined || body.companyId !== undefined || body.mode !== undefined) {
 		const patched = patchConversation(params.id, {
 			...(body.taskId !== undefined ? { taskId: body.taskId } : {}),
 			...(body.deviceId !== undefined ? { deviceId: body.deviceId } : {}),
 			...(body.companyId !== undefined ? { companyId: body.companyId } : {}),
+			...(body.mode !== undefined ? { mode: body.mode } : {}),
 		});
 		if (!patched) return sendError(res, 404, "会话不存在");
 		if (patched.error) return sendError(res, 400, patched.error);

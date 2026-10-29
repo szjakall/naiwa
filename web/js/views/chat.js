@@ -19,6 +19,7 @@ const TOOL_LABEL = {
 	list_findings: "列漏洞",
 	whois_lookup: "WHOIS 查询",
 	dns_lookup: "DNS 解析",
+	enumerate_subdomains: "子域枚举",
 	create_recon_task: "发起侦察",
 	record_finding: "记录漏洞",
 	generate_report: "生成报告",
@@ -103,7 +104,7 @@ export default {
 
 			const projectCard = card({
 				title: "项目",
-				sub: project ? `${project.id}` : "未绑定",
+				sub: project ? `${project.id}${project.platform === "android" ? " · 移动端" : ""}` : "未绑定",
 				actions: project ? html`<a class="btn ghost small" href="#/tasks/${project.id}">打开</a>` : "",
 				body: project
 					? html`<div class="project-card">
@@ -111,7 +112,10 @@ export default {
 								<span class="dim" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${project.title}</span>
 								${statusChip(project.running ? "running" : project.status)}
 							</div>
-							<div class="tiny muted mt-8">${project.stage || "—"} · 目标 ${(project.scope ?? []).length}</div>
+							<div class="tiny muted mt-8">
+								${project.appPackage ? html`<span class="mono">${project.appPackage}</span> · ` : ""}${project.stage || "—"}
+								${project.platform === "android" ? "" : ` · 目标 ${(project.scope ?? []).length}`}
+							</div>
 							<div class="project-metrics">
 								<span><strong>${project.assets ?? 0}</strong> 资产</span>
 								<span><strong>${project.findings ?? 0}</strong> 发现</span>
@@ -120,6 +124,7 @@ export default {
 							<div class="row mt-12" style="gap:8px">
 								<a class="btn ghost small" href="#/traffic?taskId=${project.id}">看流量</a>
 								<a class="btn ghost small" href="#/tasks/${project.id}">看项目</a>
+								<a class="btn ghost small" href="#/findings?taskId=${project.id}">看漏洞</a>
 							</div>
 						</div>`
 					: html`<div class="small muted">
@@ -130,8 +135,16 @@ export default {
 
 			const bindCard = card({
 				title: "绑定",
-				sub: "归属与设备",
+				sub: "形态 / 归属 / 设备",
 				body: html`
+					<label class="field">
+						<span>会话形态</span>
+						<select id="bind-mode">
+							<option value="web" ${(current?.mode ?? "web") === "web" ? "selected" : ""}>Web 站点评估</option>
+							<option value="android" ${current?.mode === "android" ? "selected" : ""}>安卓 App 评估</option>
+						</select>
+						<span class="hint">移动端形态下，新项目按 App 建（认包名），不发起站点侦察。</span>
+					</label>
 					<label class="field">
 						<span>公司（交付给谁）</span>
 						<select id="bind-company">
@@ -309,6 +322,24 @@ export default {
 			);
 
 			const bindCompany = root.querySelector("#bind-company");
+			const bindMode = root.querySelector("#bind-mode");
+			if (bindMode) {
+				bindMode.addEventListener("change", async () => {
+					try {
+						await api.patch(`/api/chat/${current.id}`, { mode: bindMode.value });
+						toast(
+							bindMode.value === "android"
+								? "已切到安卓形态：新项目按 App 建，设备工具优先"
+								: "已切到 Web 形态：新项目按站点建",
+							"success",
+							6000,
+						);
+						ctx.reload();
+					} catch (error) {
+						toast(error.message, "error");
+					}
+				});
+			}
 			if (bindCompany) {
 				bindCompany.addEventListener("change", async () => {
 					try {
