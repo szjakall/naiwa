@@ -64,6 +64,31 @@ node scripts/check-i18n-keys.mjs   # 三语键对账（改 i18n 后必须跑）
 前端改动后请重新执行"静态导出 → 内嵌 → 重编二进制"，否则跑的是上一次的产物。
 排查这类问题最快的方式是看二进制的构建时间：`ls -l starry`。
 
+### Docker 构建
+
+镜像自带完整构建链（Node 22 → Go 1.26 → Python 3.12 运行时），宿主机只需要 Docker：
+
+```bash
+cp .env.example .env            # 至少设置 POSTGRES_PASSWORD
+docker compose up -d --build    # 构建 + 启动（含 PostgreSQL）
+docker compose logs -f starry   # 看启动日志
+```
+
+只构建镜像不启动：
+
+```bash
+docker build -t starry:dev --build-arg VERSION=$(git describe --tags --always) .
+docker run --rm -p 8787:8787 -p 8788:8788 -v "$PWD/data:/app/data" starry:dev
+```
+
+要点：
+
+- 前端在 `web` 阶段静态导出，`web/out` 随后被拷进 `server/webui/dist` 并用 `-tags embedui` 内嵌，
+  所以**镜像里不需要 Node 运行时**，最终产物仍是单二进制
+- `skills/` 打进 `server/skillsdist`，首次启动物化到 `<data>/skills`，可挂载覆盖
+- 数据卷固定 `/app/data`；`docker compose down` 不会删数据，`down -v` 才清库
+- 国内拉依赖慢时在 `.env` 里设 `GOPROXY=https://goproxy.cn,direct`（compose 会透传给 build）
+
 ### 设备端 APK
 
 ```bash

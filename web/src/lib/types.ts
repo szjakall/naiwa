@@ -898,3 +898,51 @@ export interface KnowledgeLog {
   hits: number;
   created_at: string;
 }
+
+/** 安卓流量：设备端 tcpdump 抓到的 pcap。 */
+export interface AndroidCapture {
+  name: string;
+  size: number;
+  mod_time: string;
+  device?: string;
+}
+
+export interface AndroidFlow {
+  time: string;
+  last: string;
+  src: string;
+  dst: string;
+  src_port: number;
+  dst_port: number;
+  /** http | tls | dns | quic | tcp */
+  kind: string;
+  /** SNI / DNS 域名 / HTTP Host */
+  name: string;
+  method: string;
+  path: string;
+  status: string;
+  content_type: string;
+  req_bytes: number;
+  resp_bytes: number;
+  packets: number;
+  tls: boolean;
+  preview: string;
+  /** 二进制/密文时的十六进制视图 */
+  hex?: string;
+  /** 请求包（客户端 → 服务端）解码结果：文本优先，二进制给 hex */
+  req_preview: string;
+  resp_preview: string;
+  req_hex?: string;
+  resp_hex?: string;
+}
+
+export interface AndroidCaptureDetail {
+  flows: AndroidFlow[];
+  packets: number;
+  http_flows: number;
+  tls_flows: number;
+  dns_queries: number;
+  quic_flows: number;
+  other_tcp: number;
+  truncated: boolean;
+}

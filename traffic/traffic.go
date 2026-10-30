@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -78,6 +79,16 @@ type Traffic struct {
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
 	pass sync.Map // hostname(string) -> struct{}
+
+	// 上游出口：空 = 直连。bypass 是"仍然直连"的主机后缀表。
+	upstreamMu sync.RWMutex
+	upstream   *url.URL
+	bypass     []string
+
+	// 分流统计：操作员需要知道"配了出口到底有没有在用"。
+	viaUpstream atomic.Int64 // 走上游出口的请求数
+	viaBypass   atomic.Int64 // 命中绕过表而直连的请求数
+	viaDirect   atomic.Int64 // 未配出口时的直连请求数
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -121,12 +132,12 @@ func Open(dir, addr string) (*Traffic, error) {
 		db.Close()
 		return nil, err
 	}
-	// Dial targets DIRECTLY. go-mitmproxy's default upstream uses
-	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment
-	// (a VPN/system proxy) would make it forward target requests through that
-	// external proxy — which can't reach the target → 502. We capture target
-	// traffic directly, never via the host's proxy.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return nil, nil })
+	// 上游出口：默认直连（忽略宿主 HTTP_PROXY/HTTPS_PROXY，否则环境里的系统代理会让
+	// 目标请求绕道外部代理、访问不到目标 → 502）。操作员可在「流量 → 出口代理」里
+	// 指定 HTTP/SOCKS5 出口与绕过列表，此时按规则分流：命中绕过表仍直连。
+	p.SetUpstreamProxy(func(req *http.Request) (*url.URL, error) {
+		return t.upstreamFor(req)
+	})
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
@@ -137,6 +148,159 @@ func Open(dir, addr string) (*Traffic, error) {
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
 	return t, nil
+}
+
+// upstreamFor 决定一条请求走直连还是走上游代理。
+//
+// 规则（按顺序）：
+//  1. 没配上游 → 直连
+//  2. 主机命中绕过表（后缀匹配）→ 直连
+//  3. 否则走上游代理
+//
+// 用后缀匹配而非精确匹配，是因为操作员通常写 `internal.corp` 就想覆盖
+// `a.internal.corp`；后缀匹配对 `evil-internal.corp` 这类后缀撞车由调用方
+// 用 `.` 前缀自行规避（见 normalizeBypass）。
+func (t *Traffic) upstreamFor(req *http.Request) (*url.URL, error) {
+	t.upstreamMu.RLock()
+	up := t.upstream
+	bypass := t.bypass
+	t.upstreamMu.RUnlock()
+	if up == nil {
+		t.viaDirect.Add(1)
+		return nil, nil
+	}
+	host := strings.ToLower(hostOnly(req.URL.Host))
+	if host == "" {
+		host = strings.ToLower(hostOnly(req.Host))
+	}
+	for _, suffix := range bypass {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			t.viaBypass.Add(1)
+			return nil, nil
+		}
+	}
+	t.viaUpstream.Add(1)
+	return up, nil
+}
+
+// UpstreamStats 返回分流计数（进程内累计，重启归零）。
+func (t *Traffic) UpstreamStats() (upstream, bypass, direct int64) {
+	return t.viaUpstream.Load(), t.viaBypass.Load(), t.viaDirect.Load()
+}
+
+// ProbeUpstream 在保存前探一次出口可用性：TCP 能连上，SOCKS5 还要握手成功。
+// 只校验格式不够——写错端口或忘了起代理，操作员会以为"抓不到包是目标的问题"。
+func ProbeUpstream(rawURL string, timeout time.Duration) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil
+	}
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "http://" + rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("代理地址不合法: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("只支持 http/https/socks5 出口，收到 %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("代理地址缺少主机: %s", rawURL)
+	}
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "8080"
+		case "https":
+			port = "443"
+		default:
+			port = "1080"
+		}
+	}
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), timeout)
+	if err != nil {
+		return fmt.Errorf("出口不可达（%s:%s）: %w", host, port, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	if scheme == "socks5" || scheme == "socks5h" {
+		// VER=5, NMETHODS=2(无认证/用户名密码)
+		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+			return fmt.Errorf("SOCKS5 握手写入失败: %w", err)
+		}
+		reply := make([]byte, 2)
+		if _, err := io.ReadFull(conn, reply); err != nil {
+			return fmt.Errorf("SOCKS5 握手无响应（可能不是 SOCKS5 端口）: %w", err)
+		}
+		if reply[0] != 0x05 {
+			return fmt.Errorf("SOCKS5 握手响应异常（版本 %d）", reply[0])
+		}
+		if reply[1] == 0xFF {
+			return fmt.Errorf("SOCKS5 拒绝所有认证方式")
+		}
+	}
+	return nil
+}
+
+// SetUpstream 配置上游出口代理与绕过列表（空串表示改回直连）。
+// http/https/socks5 都接受；socks5 支持 `socks5h://` 等价语义（远程 DNS 由代理解析）。
+func (t *Traffic) SetUpstream(rawURL string, bypassHosts []string) error {
+	var parsed *url.URL
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL != "" {
+		if !strings.Contains(rawURL, "://") {
+			rawURL = "http://" + rawURL
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("代理地址不合法: %w", err)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("只支持 http/https/socks5 出口，收到 %q", u.Scheme)
+		}
+		if u.Hostname() == "" {
+			return fmt.Errorf("代理地址缺少主机: %s", rawURL)
+		}
+		parsed = u
+	}
+
+	cleaned := make([]string, 0, len(bypassHosts))
+	for _, item := range bypassHosts {
+		h := strings.ToLower(strings.TrimSpace(item))
+		h = strings.TrimPrefix(h, ".")
+		if h == "" {
+			continue
+		}
+		cleaned = append(cleaned, h)
+	}
+
+	t.upstreamMu.Lock()
+	t.upstream = parsed
+	t.bypass = cleaned
+	t.upstreamMu.Unlock()
+	return nil
+}
+
+// Upstream 返回当前出口配置（供 API 回显）。
+func (t *Traffic) Upstream() (string, []string) {
+	t.upstreamMu.RLock()
+	defer t.upstreamMu.RUnlock()
+	out := ""
+	if t.upstream != nil {
+		out = t.upstream.String()
+	}
+	bypass := append([]string{}, t.bypass...)
+	return out, bypass
 }
 
 // hostOnly strips an optional :port, so passthrough keys match whether the host

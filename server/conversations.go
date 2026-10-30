@@ -337,6 +337,12 @@ func (s *Server) pgStopConversation(w http.ResponseWriter, r *http.Request) {
 	busyKey := s.convBusyKey(c.ID)
 	s.chatMu.Lock()
 	cancel := s.chatCancel[busyKey]
+	if cancel != nil {
+		if s.chatStop == nil {
+			s.chatStop = map[string]bool{}
+		}
+		s.chatStop[busyKey] = true
+	}
 	s.chatMu.Unlock()
 	if cancel == nil {
 		writeJSON(w, 200, map[string]any{"status": "idle"}) // nothing running

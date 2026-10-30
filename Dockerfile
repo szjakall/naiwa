@@ -1,42 +1,66 @@
 # syntax=docker/dockerfile:1
 #
-# 运行镜像（不在镜像里编译）：只装常用工具，放入**预编译好的 Linux 单二进制**。
-# 二进制由 CI 的 binaries job 交叉编译（纯 Go、无 QEMU），按目标架构放在
-# 构建上下文的 dist/<TARGETARCH>/starry。这样多架构构建时 arm64 只需模拟 apt 层，
-# 不再模拟 Next/Go 编译，速度快得多。
+# Starry 多阶段构建：前端静态导出 → Go 单二进制（内嵌 UI 与 skills）→ 精简运行镜像。
 #
-# 本地手动构建镜像时，先自行准备二进制：
-#   cd web && npm run build:static && cd ..
-#   cp -r web/out server/webui/dist
-#   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/starry ./cmd/starry
-#   docker build -t starry:local .
+# 为什么在镜像里编译：早期版本假设 CI 先给好 dist/<arch>/starry，本地 `docker build`
+# 直接失败。现在 `docker compose up -d --build` 一条命令就能从源码起。
+#
+#   1) web     node:22  → npm ci → next build（静态导出，产物在 web/out）
+#   2) build   golang:1.26 → web/out 塞进 server/webui/dist、skills 塞进 server/skillsdist，
+#              go build -tags embedui 出单二进制
+#   3) runtime python:3.12-slim（报告 .docx 需要 python-docx）+ 常用探测工具
+
+# ---------- 1. 前端 ----------
+FROM node:22-alpine AS web
+WORKDIR /src/web
+# 先只拷依赖清单，命中缓存时不必重装
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+COPY web/ ./
+# 构建期不访问外网字体（已改为本机字体栈）
+RUN NODE_OPTIONS=--max-old-space-size=3072 npm run build:static
+
+# ---------- 2. 后端 ----------
+FROM golang:1.26-alpine AS build
+RUN apk add --no-cache git ca-certificates
+WORKDIR /src
+# 依赖单独一层，改代码不必重下模块
+COPY go.mod go.sum ./
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY} GOTOOLCHAIN=auto CGO_ENABLED=0
+RUN go mod download
+COPY . .
+COPY --from=web /src/web/out ./server/webui/dist
+# 内置 skill：运行时会物化到 <data>/skills
+RUN rm -rf ./server/skillsdist && mkdir -p ./server/skillsdist && cp -r ./skills/. ./server/skillsdist/
+ARG VERSION=dev
+RUN go build -tags embedui -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION} -X starry/server.BuildVersion=${VERSION}" \
+      -o /out/starry ./cmd/starry
+
+# ---------- 3. 运行 ----------
 FROM python:3.12-slim-bookworm
-ARG TARGETARCH
-# 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
-# Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates ripgrep curl wget vim git jq unzip \
+      ca-certificates tzdata curl ripgrep jq unzip \
       dnsutils iputils-ping netcat-openbsd whois nmap \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && pip install --no-cache-dir python-docx \
     && rm -rf /var/lib/apt/lists/*
-# 预装 Playwright MCP/CLI + Chromium，让容器内 browser MCP 开箱即用。
-# 注意：上一层清了 apt lists，而 `--with-deps` 要用 apt 装 chromium 的系统依赖，
-# 故本层先 apt-get update 重建列表，否则 playwright install 会以 exit 100 失败。
-RUN apt-get update \
-    && npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
-    && playwright-cli --help \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
-# 报告生成依赖 python-docx（Go 侧渲染 .docx 时作为子进程调用 report_builder.py）
-RUN pip install --no-cache-dir python-docx
+
 WORKDIR /app
-# 预编译好的对应架构二进制（dist/amd64/starry 或 dist/arm64/starry）
-COPY dist/${TARGETARCH}/starry /app/starry
+COPY --from=build /out/starry /app/starry
 RUN chmod +x /app/starry
-COPY skills/ /app/skills/
-# data/（SQLite + jwt.key）持久化点
+
+# 数据目录：JWT 密钥、流量录制、抓包、报告、skills 物化产物
+ENV TZ=Asia/Shanghai
 VOLUME ["/app/data"]
 EXPOSE 8787 8788
+
+# 监听端口可被 -addr 覆盖（例如直接跑宿主端口 8848 时），
+# 健康检查跟着 STARRY_HEALTH_PORT 走，避免"服务正常但容器 unhealthy"。
+ENV STARRY_HEALTH_PORT=8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD sh -c 'curl -fsS http://127.0.0.1:${STARRY_HEALTH_PORT}/api/health || exit 1'
+
 ENTRYPOINT ["/app/starry"]
-CMD ["-addr", ":8787", "-proxy", ":8788"]
+CMD ["-addr", ":8787", "-proxy", ":8788", "-data", "/app/data"]

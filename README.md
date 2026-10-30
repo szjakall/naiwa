@@ -42,55 +42,77 @@ Starry 是一个自托管的渗透测试控制台：**Go 单二进制内嵌 Next
 | 用户与合规 | RBAC 多用户、权限矩阵、登录审计、拦截规则、审批记录、实时日志 |
 | 自更新 | 二进制内一键升级，带校验与回滚位 |
 
-## 快速开始
+## 快速开始（Docker）
 
-前置：**PostgreSQL 14+**、**LLM 凭据**（Anthropic / OpenAI 兼容接口任选，也可在 UI 里配）。
-生成 `.docx` 报告需要 `python3` + `python-docx`（Docker 镜像已内置）。
-
-### 方式一：Docker（推荐）
+推荐用 Docker 部署：一条命令从源码构建并起前端、后端与 PostgreSQL。
 
 ```bash
-curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/.env.example
+git clone https://github.com/szjakall/naiwa.git && cd naiwa
 cp .env.example .env          # 至少改 POSTGRES_PASSWORD
-docker compose up -d
+docker compose up -d --build  # 首次构建约 3–8 分钟（拉依赖 + 编前端）
 ```
 
 打开 `http://localhost:8787`，首次进入 `/setup` 设置管理员密码。
-镜像自带 Chromium 与 Playwright，浏览器类 MCP 开箱可用。
 
-### 方式二：预编译二进制
+| 端口 | 用途 |
+| --- | --- |
+| `8787` | 控制台（Web UI + API） |
+| `8788` | MITM 抓包代理（把浏览器/工具指向它即可录制流量） |
 
-到 [Releases](https://github.com/szjakall/naiwa/releases/latest) 下载对应平台包，解压后：
+数据落在宿主机 `./data`（JWT 密钥、流量录制、抓包、报告、物化的 skills），
+数据库在 `pgdata` 卷里；`docker compose down` 不会丢数据，重建容器也照旧。
+
+常用操作：
+
+```bash
+docker compose logs -f starry          # 看日志
+docker compose up -d --build           # 改代码后重建
+docker compose down                    # 停止（保留数据）
+docker compose down -v                 # 连数据库卷一起删（清空重来）
+```
+
+镜像内已包含 Python 3.12 + `python-docx`（报告渲染）、Chromium 依赖所需的基础工具
+（`curl`/`rg`/`nmap`/`dnsutils` 等），不需要在宿主机装任何运行时。
+
+### 复用已有 PostgreSQL（host 网络）
+
+compose 之外也可能想直接跑一个容器，尤其当数据库已经在宿主机上时。
+容器默认 bridge 网络访问不到宿主 `127.0.0.1`，用 `--network host` 最省事：
+
+```bash
+docker run -d --name starry --network host --restart unless-stopped \
+  -v /opt/starry/data:/app/data \
+  -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
+  -e STARRY_HEALTH_PORT=8848 \
+  starry:latest -addr :8848 -proxy 127.0.0.1:18889 -data /app/data
+```
+
+- `-addr` 换了端口就要同步 `STARRY_HEALTH_PORT`，否则容器会显示 unhealthy（服务本身是好的）
+- `--network host` 下容器直接用宿主端口，注意别和宿主上原有进程抢端口
+- 数据目录挂到宿主后，换镜像/重建容器都不影响 jwt.key、抓包、报告
+
+### 不用 Docker：单二进制
+
+到 [Releases](https://github.com/szjakall/naiwa/releases/latest) 下载对应平台的包，
+准备一个 PostgreSQL，然后：
 
 ```bash
 cp config.example.json config.json   # 填 database 连接
 ./starry -addr :8787 -data ./data
 ```
 
-数据库连接也可用环境变量覆盖：`STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`。
+数据库也可用环境变量指定：`STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`。
 
-### 方式三：从源码构建
+### 从源码开发
 
-前置 Go 1.24+、Node 20+、PostgreSQL：
+前端改动需要重新导出再内嵌，见 [CONTRIBUTING.md](CONTRIBUTING.md)：
 
 ```bash
-cd web
-npm install
-npm run build:static                 # 静态导出到 web/out（构建期不访问外网）
-cd ..
-
-rm -rf server/webui/dist && mkdir -p server/webui/dist
-cp -r web/out/. server/webui/dist/   # 前端内嵌
-
-rm -rf server/skillsdist && mkdir -p server/skillsdist
-cp -r skills/. server/skillsdist/    # 内置 skill 内嵌
-
+cd web && npm install && npm run build:static && cd ..
+rm -rf server/webui/dist && mkdir -p server/webui/dist && cp -r web/out/. server/webui/dist/
+rm -rf server/skillsdist && mkdir -p server/skillsdist && cp -r skills/. server/skillsdist/
 CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
-./starry -addr :8787 -data ./data
 ```
-
-完整步骤与开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 首次使用
 

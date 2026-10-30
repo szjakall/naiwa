@@ -867,16 +867,19 @@ export default function ChatPage() {
   }
 
   return (
-    <div data-full-bleed="" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[17rem_1fr] grid-rows-[minmax(0,1fr)] gap-3">
+    <div data-full-bleed="" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden p-2 md:p-3">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[17rem_1fr] grid-rows-[minmax(0,1fr)] gap-3 overflow-hidden">
         {/* left: conversation list */}
-        <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
+        <div className="bg-card flex min-h-0 flex-col overflow-hidden rounded-lg border">
           <div className="border-b p-2">
             <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
               <PlusIcon /> {t("chat.newChat")}
             </Button>
           </div>
-          <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+          <ScrollArea
+            type="auto"
+            className="min-h-0 min-w-0 flex-1 overflow-hidden [&_[data-slot=scroll-area-viewport]>div]:block!"
+          >
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
               {convs.length === 0 && (
                 <p className="text-muted-foreground px-2 py-6 text-center text-xs">{t("chat.emptyList")}</p>

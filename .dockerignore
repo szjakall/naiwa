@@ -2,8 +2,14 @@
 **/node_modules
 web/.next
 web/out
+server/webui
 server/webui/dist
-/starry
+server/skillsdist
+dist
 data
 *.db
 transcripts
+**/*.log
+**/.DS_Store
+integrations/rea/node_modules
+integrations/rea/dist

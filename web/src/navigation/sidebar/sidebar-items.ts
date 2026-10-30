@@ -11,6 +11,7 @@ import {
   MessageSquare,
   Network,
   Plug,
+  RadioTower,
   ScrollText,
   Settings2,
   ShieldAlert,
@@ -72,6 +73,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "devices", title: "安卓设备", url: "/function/devices", icon: Smartphone },
+      { id: "androidTraffic", title: "安卓流量", url: "/function/android-traffic", icon: RadioTower },
     ],
   },
   {

@@ -306,6 +306,12 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "保存失败: "+err.Error())
 		return
 	}
+	// settings 里留的是"旧单用户密码"兼容副本，仅首启用它建内置 admin。
+	// 改密不同步它，就会出现"库里两处哈希不一致"——重启后按哪一处判断都像口令漂移，
+	// 排查时会误以为是服务端 bug。这里一并刷新，两处始终一致。
+	if u.ID == "admin" {
+		_ = pg.SetSetting(authPassKey, string(newHash))
+	}
 	pg.RecordAudit(u.Username, "auth", "change_password", "success", ip, "修改密码成功", nil)
 	// 用新版本号给调用方补发一张 token，避免「刚改完密码自己就被踢」；其它设备的旧 token 仍失效。
 	fresh := ""

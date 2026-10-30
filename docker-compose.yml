@@ -1,3 +1,13 @@
+# Starry 默认部署：一条命令起（前端 + 后端 + PostgreSQL）
+#
+#   cp .env.example .env      # 至少设置 POSTGRES_PASSWORD
+#   docker compose up -d --build
+#
+# 打开 http://localhost:8787 ，首次进 /setup 设管理员密码。
+#
+# 镜像默认从本仓库源码构建（build: .）。想用预构建镜像：注释掉 build 段，
+# 保留 image（ghcr.io/szjakall/naiwa:<tag>）即可。
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,7 +25,12 @@ services:
     restart: unless-stopped
 
   starry:
-    image: ghcr.io/szjakall/naiwa:${STARRY_TAG:-latest}
+    build:
+      context: .
+      args:
+        VERSION: ${STARRY_TAG:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: ${STARRY_IMAGE:-starry:local}
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,15 +43,13 @@ services:
       STARRY_LLM_BASE_URL: ${STARRY_LLM_BASE_URL:-}
       STARRY_LLM_PROXY: ${STARRY_LLM_PROXY:-}
     ports:
-      - "8787:8787"
-      - "8788:8788"
+      - "${STARRY_PORT:-8787}:8787"        # 控制台
+      - "${STARRY_PROXY_PORT:-8788}:8788"  # MITM 抓包代理
     volumes:
-      # 把数据目录（含 jwt.key、流量录制、抓包、报告）绑定到项目根目录的 data/，
-      # 方便在宿主机直接查看/备份，容器重建也不丢。
+      # 数据目录（jwt.key、流量录制、抓包、报告、物化的 skills）落宿主机，容器重建不丢
       - ./data:/app/data
-      # 把项目根目录的 skills 挂进容器（覆盖镜像内置的 /app/skills）；
-      # 改 skill 无需重建镜像，容器读的就是宿主机这份。
-      - ./skills:/app/skills
+      # 想改内置 skill 而不重建镜像：解开下面这行，容器读宿主机这份
+      # - ./skills:/app/skills
     restart: unless-stopped
 
 volumes:

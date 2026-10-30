@@ -18,9 +18,6 @@ import (
 //   3. 运行出错 / 被手动停止。
 // 「说过完成」不算完成：模型很容易在正文里宣布成功，但真正能复核的是它做了什么。
 
-// maxUnlimitedRounds 是"不限轮次"的硬止损：模型不收敛时最多跑到这里。
-const maxUnlimitedRounds = 50
-
 // roundBanner 生成轮次横幅：limit=0 表示不限。
 func roundBanner(round, limit int) string {
 	if limit <= 0 {
@@ -141,12 +138,9 @@ func (s *Server) runConversationGoal(c *db.Conversation, goal string, limit int,
 		s.chatMu.Unlock()
 	}()
 
-	maxRounds := limit
-	if maxRounds <= 0 {
-		// 不限轮次：仍然要有硬上限，否则模型自说自话时会一直烧钱。
-		maxRounds = maxUnlimitedRounds
-	}
-	for round := 1; round <= maxRounds; round++ {
+	// limit <= 0 表示不限轮次：没有轮数上限，也不会因为"某轮没有工具调用"就停。
+	// 退出只靠：① 手动停止 ② 达到轮次预算 ③ 运行出错。
+	for round := 1; limit <= 0 || round <= limit; round++ {
 		s.saveGoalState(c.ID, convGoalState{Status: "running", Round: round, RoundLimit: limit})
 		_, _ = pg.AppendConvActivity(c.ID, db.Activity{
 			Kind: "text", Summary: roundBanner(round, limit),
@@ -159,32 +153,28 @@ func (s *Server) runConversationGoal(c *db.Conversation, goal string, limit int,
 
 		s.runConversationSync(c, goalRoundMessage(goal, round, limit), busyKey)
 
-		items, _, err := pg.ConvActivityList(c.ID, before, 0)
+		// 手动停止（/stop）后不再继续下一轮：runConversationSync 结束时会清掉
+		// chatCancel，所以这里只能看 /stop 打下的标记。
+		s.chatMu.Lock()
+		stopped := s.chatStop[busyKey]
+		s.chatMu.Unlock()
+		if stopped {
+			s.saveGoalState(c.ID, convGoalState{
+				Status: "paused", Round: round, RoundLimit: limit, LastNote: "已手动停止",
+			})
+			_, _ = pg.AppendConvActivity(c.ID, db.Activity{
+				Kind: "text", Summary: "⏸ 目标暂停：手动停止",
+			})
+			return
+		}
+
+		_, _, err := pg.ConvActivityList(c.ID, before, 0)
 		if err != nil {
 			s.saveGoalState(c.ID, convGoalState{Status: "paused", Round: round, RoundLimit: limit, LastNote: "读取本轮活动失败：" + err.Error()})
 			return
 		}
-		tools := 0
-		for _, item := range items {
-			if item.Kind == "tool_use" {
-				tools++
-			}
-		}
-		if tools == 0 {
-			s.saveGoalState(c.ID, convGoalState{
-				Status: "paused", Round: round, RoundLimit: limit,
-				LastNote: fmt.Sprintf("第 %d 轮没有调用任何工具，判定已给出结论", round),
-			})
-			_, _ = pg.AppendConvActivity(c.ID, db.Activity{
-				Kind: "text", Summary: fmt.Sprintf("⏸ 目标暂停：第 %d 轮没有工具调用，认为已收敛", round),
-			})
-			return
-		}
-		if round == maxRounds {
+		if limit > 0 && round == limit {
 			note := fmt.Sprintf("达到轮次上限 %d", limit)
-			if limit <= 0 {
-				note = fmt.Sprintf("达到不限轮次的安全上限 %d", maxUnlimitedRounds)
-			}
 			s.saveGoalState(c.ID, convGoalState{
 				Status: "paused", Round: round, RoundLimit: limit, LastNote: note,
 			})

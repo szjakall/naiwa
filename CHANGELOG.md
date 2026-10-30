@@ -3,6 +3,118 @@
 Starry 是自主渗透测试控制台：会话 → 项目（任务）→ 资产 → 漏洞 → 报告，
 配套 AI 守门（审批）、安卓设备反连与 MCP 工具生态。
 
+## [1.0.3] — 2026-10-30
+
+体验修复、目标推进语义调整、安卓流量独立页面，以及《代理能力融合方案》的后续增量。
+（口令一致性修复原本单独占一个版本号，已并入本版，避免版本号跳到 v1.0.4。）
+
+### 修复
+
+- **对话页滚动（第二次）**：外壳给工作区页面的高度从 `100svh` 改成 `100dvh`，并让对话页
+  外层内边距归零、留给页面内部处理；页面根节点改为 `h-full` + 栅格 `overflow-hidden`。
+  上一版虽然给了高度，但被外层 padding 撑破，左栏仍然没有可滚动空间
+- **口令漂移**：`change-password` 现在把新哈希同步写回 `settings.auth.password_hash`，
+  两处不再分叉（此前改密只更新 `rbac_users`，排查时看起来像"服务端自己把口令改了"）
+
+### 变更
+
+- **取消"某轮没有工具调用即停止"**：目标推进不再据此收敛。不限轮次就是一直推进，
+  退出只剩：手动停止、轮次预算用尽、运行出错
+- 目标推进的活动流不再输出"第 N 轮无工具调用"的暂停原因
+
+### 新增
+
+- **安卓流量页**（`功能 → 安卓流量`）：把设备端 `capture_start/stop` 抓到的 pcap
+  按"一份抓包 → 多条 HTTP 交换"展示，视觉与 Web 流量页一致（左列表 + 右明细）
+  - 后端 `pcapsum`：pcap → 链路层（Ethernet/VLAN/SLL/SLL2/raw）→ IPv4 → TCP 载荷，
+    按四元组配对请求/响应，识别方法、Host、路径、状态码、Content-Type、字节数与正文预览
+  - 接口：`GET /api/android/captures`、`GET /api/android/captures/{name}/flows`、
+    `GET .../download`、`DELETE .../{name}`
+  - 明确不假装解密：TLS 只统计字节并标记"密文"
+  - 单元测试：`pcapsum/pcap_test.go`（HTTP 解析、截断文件、非 pcap 拒绝）
+
+### 安卓流量详情：请求包 / 响应包分开
+
+- 按**方向**归类载荷（客户端→服务端 = 请求，服务端→客户端 = 响应），不再按内容猜。
+  二进制协议没有请求行可嗅探，之前会把响应塞进请求，页面显示成 ↓0 B
+- 详情面板改成左右两栏：请求包 / 响应包，各自文本优先、二进制给十六进制，并显示各自字节数
+- 实测同一份抓包：111.30.187.245:8080 ↑436 B ↓200 B、211.95.34.130:443 ↑1016 B ↓824 B
+  （修前第二条是 ↓0 B）
+
+### 部署
+
+- **默认 Docker 部署**：`Dockerfile` 改成多阶段（Node 22 构建前端 → Go 1.26 编单二进制 →
+  Python 3.12 运行时），`docker compose up -d --build` 一条命令从源码起，不再要求预先准备
+  `dist/<arch>/starry`
+  - `docker-compose.yml` 默认 `build: .`（保留 `image:` 以便切回预构建镜像）
+  - 数据卷固定 `/app/data`，`HEALTHCHECK` 打 `/api/health`
+  - `.dockerignore` 瘦身构建上下文（排除 node_modules / next 产物 / data / dist）
+  - `.env.example` 补 `STARRY_IMAGE` / `STARRY_PORT` / `STARRY_PROXY_PORT` / `GOPROXY`
+- README 中英文均改为「Docker 优先」，补端口、数据卷、常用命令与「不用 Docker 的单二进制」路径
+
+### 代理能力融合（续 1.0.2）
+
+按《代理能力融合方案》的后续增量做优化。
+
+### 新增
+
+- **出口连通性自检**：保存出口前先探一次（TCP 可达；SOCKS5 还要完成握手），
+  打不通直接 400 并给出原因。此前只校验格式，配了个不可达的代理会让操作员误判
+  "抓不到包是目标的问题"
+- **分流统计**：`GET /api/traffic/upstream` 返回 `via_upstream / via_bypass / via_direct`，
+  UI 面板上直接显示——"配了出口到底有没有在用"一眼可见
+- **流量页出口面板**：折叠面板，填地址 + 绕过列表，保存即生效；「改回直连」一键复位
+- **单元测试**：`traffic/upstream_test.go` 覆盖分流判定（直连/出口/绕过后缀/后缀撞车）、
+  配置校验（非法 scheme、裸地址补全）、探测（关端口、非 SOCKS5 端口）
+
+### 实测
+
+```
+保存不可达出口   → 400 出口不可达（127.0.0.1:11080）: connection refused
+起 SOCKS5 后保存 → 200，bypass=["internal.corp"]
+请求 example.net → stats.via_upstream=1
+请求 internal.corp → stats.via_bypass=1
+go test ./traffic -run 'Upstream|Probe' → ok
+```
+
+### 待办（方案里未做的）
+
+- 按任务指定出口：需要每个任务独立的 MITM 实例（端口/CA 分叉），
+  属于架构改动，先不塞进补丁版本
+- h2 经 SOCKS5 的回归用例：路由与探测已覆盖，h2 链路待补
+
+## [1.0.2] — 2026-10-30
+
+体验修复 + 代理出口能力融合。
+
+### 修复
+
+- **对话页滚动**：外壳给工作区页面一个确定高度（`100svh - header`）并改为 flex 列，页面根节点用
+  `flex-1`；左栏会话列表恢复独立滚动。此前 `h-full` 在 auto 高度父级里退化为 auto，整页跟着变高，
+  滚轮只作用在右侧内容上
+- **不限轮次＝真不限**：删掉 50 轮硬上限，退出只靠"某一轮没有工具调用"、手动停止、运行出错
+- **停止判定**：`runConversationSync` 结束会清掉 `chatCancel`，原先的"是否还在跑"判断永远为假，
+  导致第一轮后误标"已手动停止"；改为 `/stop` 打独立标记，循环据此退出
+- **任务/对话里的工具调用显示**：折叠行从单行截断改成两行折行 + 禁止横向溢出；
+  结构化参数（`insert_assets` / `record_fact` / `insert_finding` 等）改为一行人话摘要，
+  不再把整段 JSON 塞进一行
+
+### 新增
+
+- **流量出口代理**（融合 Sentinel 2.2.7 的出口治理）：`GET/POST /api/traffic/upstream`
+  - 支持 `http` / `https` / `socks5` / `socks5h`，空串表示直连
+  - `bypass` 后缀匹配表：命中的主机仍走直连
+  - 落库持久化（`traffic_upstream` / `traffic_bypass`），重启自动恢复；校验失败保持原配置
+  - 实测：经录制代理请求 `example.org` → 上游出现 `SOCKS5 CONNECT example.org:80`；
+    加入 bypass 后 CONNECT 计数不变
+  - 方案与取舍见 [docs/proxy-fusion.md](docs/proxy-fusion.md)
+- **`-reset-admin` 命令行**：离线重置管理员口令（`./starry -reset-admin '新口令'`，
+  传 `random` 自动生成），同时刷新 `settings` 里的兼容副本。此前口令漂移只能进数据库手工改
+
+### 已知待办
+
+- 出口代理目前只有 API，流量页表单未做
+
 ## [1.0.1] — 2026-10-30
 
 按使用反馈修的五处问题。

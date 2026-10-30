@@ -2,17 +2,20 @@
 
 import * as React from "react";
 import {
-  RadioTowerIcon,
-  SearchIcon,
+  CameraIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  XIcon,
   Loader2Icon,
-  CameraIcon,
   Maximize2Icon,
   Minimize2Icon,
+  NetworkIcon,
+  RadioTowerIcon,
+  SearchIcon,
+  XIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import { HttpPacket, requestWithHost } from "@/components/http-packet";
 import { PacketShotModal } from "@/components/packet-shot-modal";
@@ -21,6 +24,8 @@ import { LinkTrafficDialog } from "@/components/link-traffic-dialog";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -94,6 +99,110 @@ function SnippetText({ text }: { text: string }) {
 // single page, which would only ever list the methods on that page.
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 const PAGE_SIZES = [25, 50, 100, 200];
+
+// UpstreamPanel 是"出口代理"面板：抓包链路默认直连，目标只能经代理到达时在这里配。
+// 保存时服务端会先探一次连通性——配了个打不通的出口，比不配更难排查。
+function UpstreamPanel() {
+  const { t } = useTranslation();
+  const [upstream, setUpstream] = React.useState("");
+  const [bypass, setBypass] = React.useState("");
+  const [stats, setStats] = React.useState<Record<string, number>>({});
+  const [saving, setSaving] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      const res = await api.trafficUpstream();
+      setUpstream(res.upstream ?? "");
+      setBypass((res.bypass ?? []).join("\n"));
+      setStats(res.stats ?? {});
+    } catch {
+      // 面板是辅助信息，读失败不打断主流程
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const hosts = bypass
+        .split(/[\n,]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const res = await api.setTrafficUpstream(upstream.trim(), hosts);
+      setUpstream(res.upstream);
+      setBypass(res.bypass.join("\n"));
+      toast.success(t("traffic.upstream.saved"));
+      await load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
+      >
+        <span className="flex items-center gap-2">
+          <NetworkIcon className="size-4 text-muted-foreground" />
+          <span className="font-medium">{t("traffic.upstream.title")}</span>
+          <span className="text-muted-foreground font-mono text-xs">{upstream || t("traffic.upstream.direct")}</span>
+        </span>
+        <span className="text-muted-foreground flex items-center gap-3 text-xs tabular-nums">
+          <span>{t("traffic.upstream.viaUpstream", { count: stats.via_upstream ?? 0 })}</span>
+          <span>{t("traffic.upstream.viaBypass", { count: stats.via_bypass ?? 0 })}</span>
+          <ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 py-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[260px] flex-1 space-y-1">
+              <Label className="text-xs">{t("traffic.upstream.address")}</Label>
+              <Input
+                value={upstream}
+                onChange={(e) => setUpstream(e.target.value)}
+                placeholder="socks5://127.0.0.1:1080 或 http://proxy:8080"
+                className="h-8 font-mono text-xs"
+              />
+            </div>
+            <Button size="sm" onClick={() => void save()} disabled={saving}>
+              {saving ? t("traffic.upstream.saving") : t("traffic.upstream.save")}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setUpstream("");
+                void save();
+              }}
+              disabled={saving}
+            >
+              {t("traffic.upstream.reset")}
+            </Button>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">{t("traffic.upstream.bypass")}</Label>
+            <Textarea
+              value={bypass}
+              onChange={(e) => setBypass(e.target.value)}
+              placeholder={"internal.corp\n10.0.0.0"}
+              className="min-h-16 font-mono text-xs"
+            />
+            <p className="text-muted-foreground text-[11px]">{t("traffic.upstream.hint")}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function TrafficPage() {
   const { t } = useTranslation();
@@ -255,6 +364,8 @@ export default function TrafficPage() {
           </span>
         </div>
       </div>
+
+      <UpstreamPanel />
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">

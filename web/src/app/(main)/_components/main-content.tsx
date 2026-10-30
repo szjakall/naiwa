@@ -75,7 +75,11 @@ export function MainContent({ children }: { children: ReactNode }) {
         data-full-bleed={workspace ? "" : undefined}
         className={cn(
           "min-h-0 min-w-0 flex-1 overflow-x-hidden",
-          isChatPage(pathname) ? "p-2 md:p-3" : "p-4 md:p-6",
+          // 工作区页面自己管滚动。高度不再用视口减法（inset 变体还有 m-2 外边距，
+          // 减不准就会多出几像素让 body 滚动），而是走 flex 链：
+          // SidebarProvider(h-svh) → SidebarInset(flex-1) → 这里(flex-1) → 页面(h-full)。
+          workspace && "flex min-h-0 flex-1 flex-col overflow-hidden",
+          isChatPage(pathname) ? "p-0" : "p-4 md:p-6",
           "has-data-[content-padding=false]:p-0 md:has-data-[content-padding=false]:p-0",
         )}
       >

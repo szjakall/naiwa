@@ -48,7 +48,8 @@
     "logs": "日志",
     "settings": "系统配置",
     "reports": "报告管理",
-    "knowledge": "知识库"
+    "knowledge": "知识库",
+    "androidTraffic": "安卓流量"
   },
   "knowledge": {
     "title": "知识库",
@@ -1722,7 +1723,20 @@
     "copied": "已复制",
     "copyPacket": "复制报文",
     "packetSearch": "搜索报文（高亮并计数）…",
-    "matchCount": "{{count}} 处匹配"
+    "matchCount": "{{count}} 处匹配",
+    "upstream": {
+      "title": "出口代理",
+      "direct": "直连",
+      "address": "上游地址",
+      "bypass": "绕过列表（每行一个主机后缀，命中仍直连）",
+      "hint": "保存前会探测连通性。留空表示直连；支持 http / https / socks5。",
+      "save": "保存",
+      "saving": "探测中…",
+      "reset": "改回直连",
+      "saved": "出口代理已更新",
+      "viaUpstream": "走出口 {count}",
+      "viaBypass": "绕过 {count}"
+    }
   },
   "tools": {
     "title": "工具",
@@ -1975,5 +1989,27 @@
     "error": {
       "noImage": "设备没有返回图像"
     }
+  },
+  "androidTraffic": {
+    "title": "安卓流量",
+    "subtitle": "设备端 tcpdump 抓包：HTTP 明文、TLS 的 SNI、DNS 查询都会列出来",
+    "captures": "抓包文件",
+    "empty": "还没有抓包。在「安卓设备」页对设备启动抓包后会出现在这里。",
+    "pick": "从左侧选择一份抓包查看流量",
+    "noFlows": "这份抓包里没有可解析的连接（可能只抓到空包）",
+    "packets": "报文 {{count}}",
+    "httpFlows": "HTTP {{count}}",
+    "otherTcp": "其他 TCP {{count}}",
+    "truncated": "已截断",
+    "refresh": "刷新",
+    "download": "下载 pcap",
+    "delete": "删除抓包",
+    "deleted": "抓包已删除",
+    "encrypted": "密文",
+    "noPreview": "无可读内容（密文或二进制）",
+    "noHandshake": "未捕获到 TLS 握手（抓包窗口在连接建立之后开始），只有密文字节",
+    "requestPacket": "请求包",
+    "responsePacket": "响应包",
+    "emptyPacket": "（该方向没有数据）"
   }
 }

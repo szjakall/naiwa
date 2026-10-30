@@ -104,11 +104,56 @@ const kindLabel = (k: string, t: TFunction) =>
       ? t("transcript.kind.summary")
       : t("transcript.kind.explanation");
 
+// summarizeArgs 把结构化工具参数压成一行人话。
+// 直接展示原始 JSON 会让一行里塞进几百个字符，既读不懂也撑坏布局——
+// 这里按工具类型取最有信息量的字段，取不到再退回原文。
+function summarizeArgs(tool: string, raw: string): string {
+  const text = raw.trim();
+  if (!text.startsWith("{") && !text.startsWith("[")) return raw;
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return raw; // 摘要被后端截断时解析不了，直接显示原文
+  }
+  const obj = data as Record<string, unknown>;
+  switch (tool) {
+    case "insert_assets": {
+      const list = Array.isArray(obj.assets) ? obj.assets : [];
+      const names = list
+        .map((a) => (a as Record<string, unknown>)?.app_name ?? (a as Record<string, unknown>)?.domain ?? (a as Record<string, unknown>)?.host)
+        .filter(Boolean)
+        .slice(0, 3) as string[];
+      return names.length ? `${list.length} 项：${names.join("、")}` : `${list.length} 项资产`;
+    }
+    case "record_fact":
+      return typeof obj.summary === "string" ? obj.summary : raw;
+    case "insert_finding":
+      return typeof obj.title === "string" ? String(obj.title) : raw;
+    case "update_intent":
+    case "insert_intent":
+      return typeof obj.description === "string" ? String(obj.description) : raw;
+    default: {
+      // 通用兜底：取前 3 个标量字段，拼成 k=v
+      const parts: string[] = [];
+      for (const [key, value] of Object.entries(obj)) {
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+          const one = String(value).replace(/\s+/g, " ");
+          parts.push(`${key}=${one.length > 60 ? one.slice(0, 60) + "…" : one}`);
+        }
+        if (parts.length >= 3) break;
+      }
+      return parts.length ? parts.join(" · ") : raw;
+    }
+  }
+}
+
 // toolInputText renders a tool_use input for display. For Bash it pulls the shell
 // command out of the raw input JSON ({"command":…,"description":…}) so the UI shows
-// the command itself instead of JSON; other tools fall back to the raw text.
+// the command itself instead of JSON; structured tools get a one-line summary;
+// everything else falls back to the raw text.
 function toolInputText(tool: string, raw: string): string {
-  if (tool !== "Bash") return raw;
+  if (tool !== "Bash") return summarizeArgs(tool, raw);
   // full input (expanded detail): parse and pull the command out.
   try {
     const o = JSON.parse(raw);
@@ -332,14 +377,21 @@ function ToolBlock({
 
   return (
     <div className="text-xs">
-      <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
+      <button
+        onClick={toggle}
+        className="flex w-full min-w-0 items-start gap-2 overflow-hidden py-1 text-left hover:bg-muted/40"
+      >
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </span>
         <ToolIcon className={"mt-0.5 size-3.5 shrink-0 " + (running ? "text-sky-600 dark:text-sky-400" : statusTone)} />
         {showWorker && <span className={chip(group.worker)}>{group.worker}</span>}
         <span className="shrink-0 font-medium text-sky-600 dark:text-sky-400">{toolName}</span>
-        {cmd && <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{cmd}</span>}
+        {cmd && (
+          <span className="text-muted-foreground line-clamp-2 min-w-0 flex-1 break-all font-mono leading-snug">
+            {cmd}
+          </span>
+        )}
         <span className={"ml-auto shrink-0 font-medium " + statusTone}>{statusText}</span>
       </button>
       {open && (

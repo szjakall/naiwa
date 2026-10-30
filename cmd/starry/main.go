@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -60,6 +62,7 @@ func run() int {
 		addr    = flag.String("addr", ":8787", "HTTP listen address")
 		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
 		proxy   = flag.String("proxy", ":8788", "traffic recording proxy address (empty to disable)")
+		resetPW = flag.String("reset-admin", "", "重置管理员口令后退出（传新口令；传 \"random\" 自动生成）")
 	)
 	flag.Parse()
 
@@ -98,6 +101,30 @@ func run() int {
 		return 1
 	}
 	defer mgr.Close()
+
+	// 离线重置管理员口令：只在显式传参时执行，做完直接退出。
+	// 场景：口令被改过 / 迁移后对不上，而服务还在跑——用同一条命令修，不必进数据库手改。
+	if *resetPW != "" {
+		password := *resetPW
+		if password == "random" {
+			buf := make([]byte, 12)
+			if _, err := rand.Read(buf); err != nil {
+				log.Printf("生成随机口令失败: %v", err)
+				return 1
+			}
+			password = base64.RawURLEncoding.EncodeToString(buf)
+		}
+		if len(password) < 8 {
+			log.Printf("口令至少 8 位")
+			return 1
+		}
+		if err := mgr.ResetAdminPassword(password); err != nil {
+			log.Printf("重置失败: %v", err)
+			return 1
+		}
+		fmt.Printf("管理员口令已重置：%s\n", password)
+		return 0
+	}
 
 	// Default skillDir to <dataDir>/skills so bundled skills materialize into the
 	// writable, persistent data volume (portable across cloud / on-prem deploys).

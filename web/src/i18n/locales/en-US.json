@@ -48,7 +48,8 @@
     "logs": "Logs",
     "settings": "Settings",
     "reports": "Reports",
-    "knowledge": "Knowledge"
+    "knowledge": "Knowledge",
+    "androidTraffic": "Android traffic"
   },
   "knowledge": {
     "title": "Knowledge Base",
@@ -1722,7 +1723,20 @@
     "copied": "Copied",
     "copyPacket": "Copy packet",
     "packetSearch": "Search packet (highlight + count)…",
-    "matchCount": "{{count}} matches"
+    "matchCount": "{{count}} matches",
+    "upstream": {
+      "title": "Egress proxy",
+      "direct": "direct",
+      "address": "Upstream address",
+      "bypass": "Bypass list (one host suffix per line, stays direct)",
+      "hint": "Connectivity is probed before saving. Empty means direct; http / https / socks5 supported.",
+      "save": "Save",
+      "saving": "Probing…",
+      "reset": "Back to direct",
+      "saved": "Egress proxy updated",
+      "viaUpstream": "via proxy {count}",
+      "viaBypass": "bypassed {count}"
+    }
   },
   "tools": {
     "title": "Tools",
@@ -1975,5 +1989,27 @@
     "error": {
       "noImage": "Device returned no image"
     }
+  },
+  "androidTraffic": {
+    "title": "Android traffic",
+    "subtitle": "On-device tcpdump: plaintext HTTP, TLS SNI and DNS queries are all listed",
+    "captures": "Captures",
+    "empty": "No captures yet. Start a capture from the Android devices page.",
+    "pick": "Pick a capture on the left to inspect its traffic",
+    "noFlows": "No parseable connections in this capture",
+    "packets": "packets {{count}}",
+    "httpFlows": "HTTP {{count}}",
+    "otherTcp": "other TCP {{count}}",
+    "truncated": "truncated",
+    "refresh": "Refresh",
+    "download": "Download pcap",
+    "delete": "Delete capture",
+    "deleted": "Capture deleted",
+    "encrypted": "encrypted",
+    "noPreview": "No readable content (encrypted or binary)",
+    "noHandshake": "TLS handshake not captured (capture started after the connection), ciphertext only",
+    "requestPacket": "Request",
+    "responsePacket": "Response",
+    "emptyPacket": "(no data in this direction)"
   }
 }

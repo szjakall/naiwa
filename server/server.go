@@ -89,6 +89,8 @@ type Server struct {
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
 	chatCancel map[string]context.CancelFunc
+	// chatStop 记录本轮被人工停止，供目标轮次循环判断是否继续下一轮。
+	chatStop map[string]bool
 	// chatLock serializes main-agent turns PER TASK. A new steering message preempts
 	// (cancels) the in-flight turn, then waits on this lock for it to release before
 	// taking over — so human steering is never rejected, just interleaved cleanly.
@@ -646,6 +648,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/audit", s.getAudit)
 	mux.HandleFunc("POST /api/gc", s.gc)
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
+	mux.HandleFunc("GET /api/traffic/upstream", s.getTrafficUpstream)
+	mux.HandleFunc("GET /api/android/captures", s.androidCaptures)
+	mux.HandleFunc("GET /api/android/captures/{name}/flows", s.androidCaptureFlows)
+	mux.HandleFunc("GET /api/android/captures/{name}/download", s.androidCaptureDownload)
+	mux.HandleFunc("DELETE /api/android/captures/{name}", s.androidCaptureDelete)
+	mux.HandleFunc("POST /api/traffic/upstream", s.setTrafficUpstream)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
 	mux.HandleFunc("GET /api/traffic/meta", s.getTrafficMeta)
 	mux.HandleFunc("GET /api/settings", s.getSettings)

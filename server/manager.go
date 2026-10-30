@@ -1,6 +1,7 @@
 package server
 
 import (
+	"golang.org/x/crypto/bcrypt"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -77,6 +78,8 @@ type Manager struct {
 // Settings keys the UI toggles at runtime.
 const (
 	settingTrafficCapture   = "traffic_capture"
+	settingTrafficUpstream  = "traffic_upstream"  // 上游出口代理（空 = 直连）
+	settingTrafficBypass    = "traffic_bypass"    // 绕过列表（逗号分隔，仍然直连）
 	settingWebSearchOn      = "web_search_enabled"
 	settingWebSearchBackend = "web_search_backend"
 	settingBraveKey         = "brave_search_api_key"
@@ -117,6 +120,26 @@ func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
 // traffic-recording proxy. PostgreSQL is required (it is the single data source).
+// ResetAdminPassword 离线重置内置 admin 的口令（CLI `-reset-admin` 用）。
+// 同时刷新 settings 里的兼容副本，避免"库里两处哈希不一致"再次出现——
+// 之前正是这种不一致导致重启后按旧值登录失败。
+func (m *Manager) ResetAdminPassword(password string) error {
+	if m.pg == nil {
+		return fmt.Errorf("数据库未就绪")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	if err := m.pg.UpdateRBACUserPassword("admin", string(hash)); err != nil {
+		return err
+	}
+	if err := m.pg.SetSetting("auth.password_hash", string(hash)); err != nil {
+		return err
+	}
+	return nil
+}
+
 func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Resolve the data dir to an ABSOLUTE path up front. Every data path derives
 	// from it — notably the MITM CA cert, whose path is injected into worker shells
@@ -157,6 +180,24 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Asset auto-completion engine (§5): HTTP probes routed through the recording
 	// proxy (via m.ProxyAddr, which honors the traffic-capture toggle).
 	m.trafficOn = pg.GetBool(settingTrafficCapture, false)
+	// 出口代理：重启后继续生效（否则重启会悄悄退回直连，抓到的流量与配置不符）。
+	if m.traffic != nil {
+		upstream, _, _ := pg.GetSetting(settingTrafficUpstream)
+		bypass, _, _ := pg.GetSetting(settingTrafficBypass)
+		hosts := []string{}
+		for _, item := range strings.Split(bypass, ",") {
+			if strings.TrimSpace(item) != "" {
+				hosts = append(hosts, item)
+			}
+		}
+		if upstream != "" || len(hosts) > 0 {
+			if err := m.traffic.SetUpstream(upstream, hosts); err != nil {
+				log.Printf("[traffic] 出口代理配置无效（保持直连）: %v", err)
+			} else if upstream != "" {
+				log.Printf("[traffic] 出口代理: %s（绕过 %d 个主机后缀）", upstream, len(hosts))
+			}
+		}
+	}
 	// Load persisted web-search config (default: off, ddgs).
 	m.webSearchOn = pg.GetBool(settingWebSearchOn, false)
 	if v, ok, _ := pg.GetSetting(settingWebSearchBackend); ok && v != "" {
@@ -181,6 +222,54 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// default to a persistent <dataDir>/fs-sandbox and ensure the dir exists.
 	m.ensureFilesystemMCPSandbox()
 	return m, nil
+}
+
+// TrafficUpstream 返回当前出口代理与绕过表（供 API 回显）。
+func (m *Manager) TrafficUpstream() (string, []string) {
+	if m.traffic == nil {
+		return "", nil
+	}
+	return m.traffic.Upstream()
+}
+
+// SetTrafficUpstream 切换出口代理并持久化；空串表示改回直连。
+// 校验失败时原配置保持不变（不允许"存了个用不了的代理"）。
+func (m *Manager) SetTrafficUpstream(upstream string, bypass []string) error {
+	if m.traffic == nil {
+		return fmt.Errorf("流量录制未启用")
+	}
+	// 保存前先探一次：格式对但地址打不通的出口，早拒绝比事后排查便宜。
+	if strings.TrimSpace(upstream) != "" {
+		if err := traffic.ProbeUpstream(upstream, 3*time.Second); err != nil {
+			return err
+		}
+	}
+	if err := m.traffic.SetUpstream(upstream, bypass); err != nil {
+		return err
+	}
+	if err := m.pg.SetSetting(settingTrafficUpstream, strings.TrimSpace(upstream)); err != nil {
+		return err
+	}
+	cleaned := make([]string, 0, len(bypass))
+	for _, item := range bypass {
+		if h := strings.TrimSpace(item); h != "" {
+			cleaned = append(cleaned, h)
+		}
+	}
+	if err := m.pg.SetSetting(settingTrafficBypass, strings.Join(cleaned, ",")); err != nil {
+		return err
+	}
+	// 浏览器 MCP 也挂着这个代理：出口变了要让它一起走新链路。
+	m.syncBrowserMCPProxy()
+	return nil
+}
+
+// TrafficUpstreamStats 返回"走出出口 / 绕过 / 直连"的请求计数。
+func (m *Manager) TrafficUpstreamStats() (upstream, bypass, direct int64) {
+	if m.traffic == nil {
+		return 0, 0, 0
+	}
+	return m.traffic.UpstreamStats()
 }
 
 // TrafficEnabled reports whether traffic capture is on (default off). When off,

@@ -44,25 +44,58 @@ reviewable chain rather than a pile of titles.
 | Users & audit | RBAC, permission matrix, login audit, intercept rules, approval history, live logs |
 | Self-update | In-binary upgrade with verification and a rollback slot |
 
-## Quick start
+## Quick start (Docker)
 
-Requirements: **PostgreSQL 14+** and **LLM credentials** (Anthropic or any OpenAI-compatible endpoint; can also be set in the UI).
-`.docx` reports need `python3` + `python-docx` (included in the Docker image).
-
-### Docker
+Docker is the recommended deployment: one command builds the UI and backend and starts PostgreSQL.
 
 ```bash
-curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/.env.example
-cp .env.example .env          # at least set POSTGRES_PASSWORD
-docker compose up -d
+git clone https://github.com/szjakall/naiwa.git && cd naiwa
+cp .env.example .env          # at least change POSTGRES_PASSWORD
+docker compose up -d --build  # first build takes ~3-8 min
 ```
 
 Open `http://localhost:8787`; the first visit goes to `/setup`.
 
-### Prebuilt binary
+| Port | Purpose |
+| --- | --- |
+| `8787` | Console (Web UI + API) |
+| `8788` | MITM recording proxy |
 
-Grab a build for your platform from [Releases](https://github.com/szjakall/naiwa/releases/latest):
+State lives in `./data` on the host (JWT key, traffic recordings, captures, reports,
+materialized skills); the database lives in the `pgdata` volume. `docker compose down`
+keeps everything, and rebuilding the container does not lose data.
+
+```bash
+docker compose logs -f starry          # logs
+docker compose up -d --build           # rebuild after code changes
+docker compose down                    # stop (data kept)
+docker compose down -v                 # also drop the database volume
+```
+
+The image ships Python 3.12 + `python-docx` (report rendering) and the usual recon tools
+(`curl`, `rg`, `nmap`, `dnsutils`), so the host needs no runtime.
+
+### Reusing an existing PostgreSQL (host network)
+
+Running a single container outside compose is common when the database already lives on the host.
+A bridge network cannot reach the host's `127.0.0.1`, so `--network host` is the simplest option:
+
+```bash
+docker run -d --name starry --network host --restart unless-stopped \
+  -v /opt/starry/data:/app/data \
+  -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
+  -e STARRY_HEALTH_PORT=8848 \
+  starry:latest -addr :8848 -proxy 127.0.0.1:18889 -data /app/data
+```
+
+- If you change `-addr`, set `STARRY_HEALTH_PORT` accordingly or the container reports unhealthy
+  while the service is actually fine
+- With `--network host` the container owns host ports directly — make sure nothing else is bound
+- Mounting the data directory keeps `jwt.key`, captures and reports across image upgrades
+
+### Without Docker: single binary
+
+Grab a build from [Releases](https://github.com/szjakall/naiwa/releases/latest), point it at a PostgreSQL, then:
 
 ```bash
 cp config.example.json config.json   # fill in the database block
@@ -71,27 +104,16 @@ cp config.example.json config.json   # fill in the database block
 
 The database can also come from `STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`.
 
-### From source
+### Building from source
 
-Go 1.24+, Node 20+, PostgreSQL:
+Frontend changes must be re-exported and re-embedded; see [CONTRIBUTING.md](CONTRIBUTING.md):
 
 ```bash
-cd web
-npm install
-npm run build:static                 # static export into web/out (no network at build time)
-cd ..
-
-rm -rf server/webui/dist && mkdir -p server/webui/dist
-cp -r web/out/. server/webui/dist/   # embed the UI
-
-rm -rf server/skillsdist && mkdir -p server/skillsdist
-cp -r skills/. server/skillsdist/    # embed the skills
-
+cd web && npm install && npm run build:static && cd ..
+rm -rf server/webui/dist && mkdir -p server/webui/dist && cp -r web/out/. server/webui/dist/
+rm -rf server/skillsdist && mkdir -p server/skillsdist && cp -r skills/. server/skillsdist/
 CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
-./starry -addr :8787 -data ./data
 ```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full flow.
 
 ## First run
 
