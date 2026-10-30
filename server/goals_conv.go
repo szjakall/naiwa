@@ -18,6 +18,17 @@ import (
 //   3. 运行出错 / 被手动停止。
 // 「说过完成」不算完成：模型很容易在正文里宣布成功，但真正能复核的是它做了什么。
 
+// maxUnlimitedRounds 是"不限轮次"的硬止损：模型不收敛时最多跑到这里。
+const maxUnlimitedRounds = 50
+
+// roundBanner 生成轮次横幅：limit=0 表示不限。
+func roundBanner(round, limit int) string {
+	if limit <= 0 {
+		return fmt.Sprintf("▶ 目标推进 · 第 %d 轮（不限轮次）", round)
+	}
+	return fmt.Sprintf("▶ 目标推进 · 第 %d/%d 轮", round, limit)
+}
+
 type convGoalState struct {
 	Status     string `json:"status"` // idle | running | paused | done
 	Round      int    `json:"round"`
@@ -59,8 +70,11 @@ func (s *Server) conversationSetGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := req.RoundLimit
-	if limit <= 0 || limit > 10 {
-		limit = 3
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 20 {
+		limit = 20
 	}
 	s.saveGoalState(c.ID, convGoalState{Status: "idle", Round: 0, RoundLimit: limit})
 	writeJSON(w, 200, map[string]any{"ok": true, "goal": goal, "round_limit": limit})
@@ -85,15 +99,19 @@ func (s *Server) conversationGoalRun(w http.ResponseWriter, r *http.Request) {
 	var state convGoalState
 	_ = json.Unmarshal(stateRaw, &state)
 	var req struct {
-		RoundLimit int `json:"round_limit"`
+		RoundLimit int  `json:"round_limit"`
+		Unlimited  bool `json:"unlimited"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	limit := req.RoundLimit
-	if limit <= 0 {
+	if limit <= 0 && !req.Unlimited {
 		limit = state.RoundLimit
 	}
-	if limit <= 0 || limit > 10 {
-		limit = 3
+	if req.Unlimited {
+		limit = 0
+	}
+	if limit > 20 {
+		limit = 20
 	}
 
 	busyKey := s.convBusyKey(c.ID)
@@ -123,10 +141,15 @@ func (s *Server) runConversationGoal(c *db.Conversation, goal string, limit int,
 		s.chatMu.Unlock()
 	}()
 
-	for round := 1; round <= limit; round++ {
+	maxRounds := limit
+	if maxRounds <= 0 {
+		// 不限轮次：仍然要有硬上限，否则模型自说自话时会一直烧钱。
+		maxRounds = maxUnlimitedRounds
+	}
+	for round := 1; round <= maxRounds; round++ {
 		s.saveGoalState(c.ID, convGoalState{Status: "running", Round: round, RoundLimit: limit})
 		_, _ = pg.AppendConvActivity(c.ID, db.Activity{
-			Kind: "text", Summary: fmt.Sprintf("▶ 目标推进 · 第 %d/%d 轮", round, limit),
+			Kind: "text", Summary: roundBanner(round, limit),
 		})
 
 		before, _ := pg.MaxConvActivitySeq(c.ID)
@@ -157,13 +180,16 @@ func (s *Server) runConversationGoal(c *db.Conversation, goal string, limit int,
 			})
 			return
 		}
-		if round == limit {
+		if round == maxRounds {
+			note := fmt.Sprintf("达到轮次上限 %d", limit)
+			if limit <= 0 {
+				note = fmt.Sprintf("达到不限轮次的安全上限 %d", maxUnlimitedRounds)
+			}
 			s.saveGoalState(c.ID, convGoalState{
-				Status: "paused", Round: round, RoundLimit: limit,
-				LastNote: fmt.Sprintf("达到轮次上限 %d", limit),
+				Status: "paused", Round: round, RoundLimit: limit, LastNote: note,
 			})
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{
-				Kind: "text", Summary: fmt.Sprintf("⏸ 目标暂停：达到轮次上限 %d", limit),
+				Kind: "text", Summary: "⏸ 目标暂停：" + note,
 			})
 			return
 		}

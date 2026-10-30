@@ -2,189 +2,184 @@
 
 # ✦ Starry
 
-**AI-Driven Autonomous Penetration Testing Platform**
+**AI-driven pentest console** · single binary · conversation-first
 
-From recon to report delivery — multi-agent, autonomous · fully observable · interactive · deliverable
+<img src="web/public/logo.png" alt="Starry" width="160" />
+
+Recon to report with a human in the loop · one orchestration for web targets and Android devices · every side effect is gated and logged
 
 [中文](README.md) | English
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/szjakall/naiwa?color=success)](https://github.com/szjakall/naiwa/releases/latest)
-[![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Fszjakall%2Fnaiwa-2496ED?logo=docker&logoColor=white)](https://github.com/szjakall/naiwa/pkgs/container/naiwa)
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](go.mod)
-
 
 </div>
 
 ---
 
-## Overview
+## What it is
 
-Starry is an AI-driven autonomous penetration testing platform. Given an authorized target, a planner / worker / main-agent multi-agent system runs the full engagement over a **dual-graph** core (a global asset graph + a per-task exploration graph) — **recon → attack-surface discovery → exploitation → finding capture → report delivery** — fully observable, interactive, and deliverable.
+Starry is a self-hosted pentest console: a **single Go binary with an embedded Next.js UI**, backed by PostgreSQL.
+You type one sentence into a conversation; the agent acts on the target — HTTP and MITM traffic for web,
+a reverse WebSocket channel for Android devices. Side-effecting actions pass an approval gate
+(auto / human review / AI judgement), and assets, findings, packets and reports are persisted as they happen.
 
-Unlike most automated pentest tools that are "great at discovery, but stop at discovery," Starry puts its weight on **delivery** — turning what the AI finds into a report that an engineer can understand, reproduce, back with evidence, and hand straight to the client.
+It is not a fire-and-forget scanner: by default every side-effecting action is gated, and the output is a
+reviewable chain rather than a pile of titles.
 
-## ✨ What's New in v2.0: Evidence-Driven Delivery
+## Capabilities
 
-v2.0 is about one thing — **turning "can find it" into "can deliver it."** The agent fixes the reproduction steps and evidence in place while it works, so the engineer's job shifts from "assembling a report from scratch" to "verify and confirm."
+| Area | What it actually does |
+| --- | --- |
+| Conversations | Per-conversation **agent / approval mode / platform (web·android) / bound device**; one operator can keep one chat fully automatic and another fully reviewed |
+| Goal loop | One-line goal plus a round budget (1/2/3/5/8/10 or **unlimited**); stops when a round makes no tool calls, the budget runs out, or it errors / is stopped |
+| Approval gate | `auto` allow, `review` blocks for a human (10 min timeout), `ai` asks a model and fails closed; covers Bash, file writes and device commands |
+| Android | Device app dials back to the console; the agent gets 7 device tools, the UI offers shell, screenshot, logcat, packages, file I/O, capture and TCP tunnels |
+| MCP | stdio and HTTP transports with tool discovery; the bundled example wires 170 reverse-engineering tools plus browser, filesystem and GitHub |
+| Tasks / assets / findings | Findings hang off tasks, four severity levels, steps linked to the real packets |
+| Traffic | Built-in MITM recorder (default `:8788`), requests and responses persisted and searchable |
+| Reports | AI narration rendered to delivery-grade `.docx` (cover, TOC, page numbers, attribute tables) in Simplified Chinese, Traditional Chinese or English |
+| Knowledge | pgvector semantic search when available, keyword search as automatic fallback |
+| Users & audit | RBAC, permission matrix, login audit, intercept rules, approval history, live logs |
+| Self-update | In-binary upgrade with verification and a rollback slot |
 
-<div align="center">
-</div>
+## Quick start
 
-**① Reproduction captured in place.** As the agent exploits, each step's request, response, expected outcome, and verification conclusion are recorded as structured data — not reconstructed after the fact — eliminating the old "incomplete or fabricated reproduction" problem.
+Requirements: **PostgreSQL 14+** and **LLM credentials** (Anthropic or any OpenAI-compatible endpoint; can also be set in the UI).
+`.docx` reports need `python3` + `python-docx` (included in the Docker image).
 
-**② Findings laid out as a kill chain.** A finding is no longer "one command plus a verdict," but a full chain from entry point and preconditions through each exploitation step, each in plain language paired with a real request — so an engineer opening the finding immediately grasps where it came from and how it was chained.
-
-<div align="center">
-</div>
-
-**③ Every step auto-linked to its real traffic.** All requests the agent makes are captured in full via MITM recording; when a finding is recorded, the system links each step to its corresponding real packet by time window and step order. One click shows the original request/response, with syntax highlighting, body search, and match counts — no need to go back to a proxy tool and reconstruct it.
-
-<div align="center">
-</div>
-
-**④ The packet is the evidence.** For findings like sensitive-information disclosure, the traffic packet itself is the proof — no more stitching together screenshots afterwards.
-
-<div align="center">
-</div>
-
-**⑤ Human-grade trilingual reports.** AI narrative + python-docx rendered into a delivery-grade `.docx` (cover / TOC / page numbers / per-vuln tables with structured reproduction), as a full report in Simplified Chinese / Traditional Chinese / English.
-
-> All UI data shown is synthetic demo data from a local test range.
-
-## Quick Start
-
-Requires **PostgreSQL**; exploration needs an **LLM** (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or configure it in the UI). Generating `.docx` reports needs `python3` + `python-docx` (bundled in the Docker image).
-
-### Option 1: One-command Docker deploy (recommended)
+### Docker
 
 ```bash
 curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/docker-compose.yml
 curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/.env.example
-cp .env.example .env          # set POSTGRES_PASSWORD
-docker compose up -d          # pulls the image + PostgreSQL and starts
+cp .env.example .env          # at least set POSTGRES_PASSWORD
+docker compose up -d
 ```
 
-Open **http://localhost:8787** — on first run, go to `/setup` to set the admin password.
+Open `http://localhost:8787`; the first visit goes to `/setup`.
 
-### Option 2: Prebuilt binary
+### Prebuilt binary
 
-Download the zip for your platform from [Releases](https://github.com/szjakall/naiwa/releases/latest) (Linux amd64/arm64 · macOS amd64/arm64 · Windows amd64), then:
+Grab a build for your platform from [Releases](https://github.com/szjakall/naiwa/releases/latest):
 
 ```bash
-cp config.example.json config.json    # fill in the database connection
-./starry                             # starry.exe on Windows
+cp config.example.json config.json   # fill in the database block
+./starry -addr :8787 -data ./data
 ```
 
-Open **http://localhost:8787**.
+The database can also come from `STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`.
 
-### Option 3: Build from source
+### From source
 
-The **full source is open** (AGPL-3.0). Requires Go 1.24+ / Node 20+ / PostgreSQL / Python 3 (report rendering):
+Go 1.24+, Node 20+, PostgreSQL:
 
 ```bash
-cd web && NEXT_EXPORT=1 npx next build && cd ..    # frontend static export
-cp -r web/out/. server/webui/dist/                 # embed the frontend
-CGO_ENABLED=0 go build -tags embedui -o starry ./cmd/starry
-./starry
+cd web
+npm install
+npm run build:static                 # static export into web/out (no network at build time)
+cd ..
+
+rm -rf server/webui/dist && mkdir -p server/webui/dist
+cp -r web/out/. server/webui/dist/   # embed the UI
+
+rm -rf server/skillsdist && mkdir -p server/skillsdist
+cp -r skills/. server/skillsdist/    # embed the skills
+
+CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
+./starry -addr :8787 -data ./data
 ```
 
-Full steps (skill embedding, dev hot-reload) are in [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full flow.
 
-## More Screens
+## First run
 
-| Dashboard | Tasks |
-| :---: | :---: |
+1. `/setup` to set the admin password, then sign in
+2. **System → LLM**: endpoint, model, key; mark it as the active profile
+3. **Chat → New chat**: pick agent, approval mode and platform on the goal bar
+4. Enter the goal, pick a round budget, hit **Auto-run**; the activity stream shows every tool call
+5. Products live under **Tasks / Assets / Findings / Traffic**; reports come from **System → Reports**
 
-## Lineage
+## Connecting an Android device
 
-Starry is a fork that started from **v0.1.1** of the open-source project ARTEX (by [@Autumn-27](https://github.com/Autumn-27)), tracking upstream ever since, with mutual exchange along the way. Full credit to the original author's foundational work.
+The device side is a standalone APK (`device/`, ~41 KB) that dials back over WebSocket.
 
-To be clear, "autonomous discovery" and "report delivery" are two different goals: ARTEX made discovery strong, while delivery is closer to each specific engagement and varies by client. Starry builds on that solid foundation and invests its engineering effort in the "delivery" half.
+```bash
+# 1. Issue a token (Function → Android devices → tokens). Plaintext shows once;
+#    the server only stores a sha256.
 
-## What Starry Adds (vs ARTEX)
+# 2. Build the APK (needs Android SDK + build-tools)
+cd device
+ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh     # -> build/starry-droid.apk
+adb install -r build/starry-droid.apk
 
-Building on its solid foundation (exploration-graph engine, MITM traffic recording, rule-based HITL interception, multi-agent orchestration), Starry mainly adds:
+# 3. In the app: console address + token
+#    ws://<console-host>:8787/ws/droid
+```
 
-| Area | Details |
+Once online, the panel exposes shell, screenshot, logcat, packages, file I/O, capture and TCP tunnels.
+Set the conversation platform to **Android** and the agent will use the device channel instead of HTTP.
+
+Protocol actions supported today: `exec` `pull` `push` `screencap` `logcat` `packages`
+`capture_start/stop/status` `tcp_open/send/close`.
+
+## Layout
+
+```
+cmd/starry/      entrypoint and flags
+server/          HTTP API, routes, approval gate, device channel, MCP, updates
+agent/           agent runtime (conversations, tool wiring, memory)
+engine/          event-driven engine and tool implementations (incl. device)
+guard/           approval gate and dangerous-command blocking
+droid/           Android reverse protocol (framing, device registry, TCP tunnels)
+db/              PostgreSQL schema and data access
+config/          config loading (config.json / env)
+report/          report model and .docx rendering (python-docx)
+integrations/    bundled MCP integration (rea)
+web/             Next.js frontend (static export embedded into the binary)
+skills/          bundled skill library (embedded into the binary)
+device/          Android device app sources and build script
+deploy/          sample systemd unit
+```
+
+## Configuration
+
+| Source | Meaning |
 | --- | --- |
-| **Evidence-driven delivery** | Reproduction captured in place, findings laid out as a kill chain, every step auto-linked to its real packet (syntax highlight / body search / match counts) |
-| **Human-grade reports** | AI narrative + python-docx into delivery-grade .docx (cover / TOC / page numbers / per-vuln tables), full report in zh / zh-TW / en |
-| Report management | Org settings, named templates (issuer / logo / personnel / CVSS), per-task generation, select which findings to include |
-| Deeper vuln management | AI enrichment into structured data (CVSS / impact / fix / structured reproduction), 4 severity levels, batch enrichment, session finding capture |
-| Trilingual i18n | Full UI in Simplified Chinese / Traditional Chinese / English |
-| Multi-user RBAC | Visual permission-matrix custom roles, system roles, resource-level scope, login audit |
-| Knowledge-base RAG | Global + per-task two-tier pgvector retrieval augmentation for agents |
+| `config.json` | database block (fields or a single `database.dsn`) |
+| `STARRY_PG_DSN` | environment variable, wins over `config.json` |
+| `-addr` | listen address, default `:8787` |
+| `-proxy` | MITM recorder port, default `:8788`; empty string disables |
+| `-data` | data directory (JWT key, traffic, captures, reports); defaults to `data/` next to the binary |
+| `STARRY_LLM_*` | default LLM settings (provider / model / base_url / proxy); can also be set in the UI |
 
-## Architecture
+## Troubleshooting
 
-A single Go backend (Next.js frontend embedded via `go:embed`) + PostgreSQL. The core is a **dual-graph** design: a globally shared asset graph (cross-task source of truth) and a per-task exploration graph (goal / intent / fact / finding lineage), linked by anchors. The engine is event-driven — any graph change wakes the planner to dispatch intents, workers execute and write back, which triggers the next round, until the goal is proven.
+**Frontend build fails with `module not found` around fonts** — the UI uses local font stacks and never fetches fonts at build time; keep `web/src/lib/fonts` network-free.
 
-```mermaid
-flowchart TB
-  subgraph FE[Frontend Next.js · embedded via go:embed]
-    UI[Dashboard · Tasks · Findings · Assets · Traffic · Reports · Knowledge]
-  end
-  subgraph SRV[server · Go net/http]
-    API[REST /api · JWT · SSE]
-    ENG[event-driven engine]
-  end
-  subgraph AG[Multi-agent orchestration]
-    PL[planner · sole intent producer]
-    WK[worker ×N]
-    MA[mainagent · human-in-the-loop]
-  end
-  subgraph DB[PostgreSQL]
-    AGRAPH[Asset graph · global]
-    EGRAPH[Exploration graph · per-task]
-  end
-  SUB[MITM recording · HITL interception · asset enrichment · reports · knowledge RAG]
+**Frontend build gets OOM-killed** — the TypeScript check is memory hungry: `NODE_OPTIONS=--max-old-space-size=3072`, and add swap on machines under 4 GB.
 
-  UI --> API --> ENG --> PL & WK
-  API --> MA
-  PL & WK & MA --> DB
-  WK --> SUB
-```
+**Device will not connect** — the app must use `ws://<host>:8787/ws/droid` (not the page URL), the token must not be revoked, and the server log shows the handshake.
 
-## Core Capabilities
+**Token list is empty although a device is online** — the list only shows active tokens; revoked rows stay in the database for audit.
 
-- Dual-graph: global asset graph + per-task exploration graph, linked by anchors
-- Multi-agent orchestration: event-driven engine, planner produces intents / N workers execute / mainagent is the human interface
-- Evidence-driven delivery: reproduction captured in place, findings as a kill chain, every step linked to its real packet
-- Human-grade trilingual reports: AI narrative + python-docx delivery-grade .docx
-- MITM traffic recording, rule-based HITL interception, MCP / Skill extension system, pgvector knowledge base
+**Report generation fails** — check `python3` and `python-docx` on the host.
 
-## Follow Us
+## Security notes
 
-For hands-on write-ups, feature deep-dives, and release updates, follow our WeChat Official Account:
+- Use it only against targets you are authorised to test. The approval gate exists for that reason — do not set everything to `auto`.
+- The device channel is equivalent to a shell on the phone; a leaked token means a compromised device.
+- Findings and evidence (packets, screenshots) may contain sensitive data.
 
-<div align="center">
-<br/>
-<sub>Scan on WeChat · <b>Starry</b></sub>
-</div>
+## License
 
-## Credits
+**AGPL-3.0**, see [LICENSE](LICENSE). Use, modification and redistribution (including as a network service) must follow its terms.
 
-- ARTEX (by [@Autumn-27](https://github.com/Autumn-27)) — the technical foundation of this project.
+This project continues to be developed on top of prior open-source work; thanks to the original authors and all contributors.
 
-## License & Disclaimer
+## Disclaimer
 
-Licensed under **AGPL-3.0** — see [LICENSE](LICENSE). Use, modification, and redistribution (including offering it as a networked service) must comply with its terms.
-
-**Starry is for personal study, code research, and local technical validation only. It must not be used to perform actual testing against any online system or website.**
-
-### Permitted use
-- Reading, studying, and researching this project, and verifying technical principles in a local, isolated environment;
-- Personal learning, academic research, and other non-offensive purposes.
-
-### Prohibited
-- Using this tool to scan, probe, exploit, or attack any website, online service, or networked system;
-- Using this tool for any real penetration testing, red/blue exercises, or production environment;
-- Using it for intrusion, data theft, ransom, denial of service, or any destructive or criminal activity;
-- Using it for anything violating the laws and regulations of your country / region.
-
-### Compliance
-Users must comply with all applicable laws and regulations on cybersecurity, data protection, and computer crime in their country / region. All legal responsibility and consequences arising from use of this project rest solely with the user.
-
-### Disclaimer
-This project is provided "AS IS", without warranty of any kind. The authors and contributors are not liable for any direct or indirect loss, data loss, system damage, or legal dispute arising from use of this tool. By downloading, installing, or using this project, you acknowledge that you have read, understood, and agree to all of the above.
+Provided "as is", without warranty of any kind. You are responsible for complying with the laws and
+regulations of your jurisdiction. Do not use it for unauthorised testing, intrusion, data theft or any
+destructive activity.

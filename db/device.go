@@ -48,8 +48,9 @@ RETURNING id, label, prefix, created_at, last_seen_at, revoked`,
 }
 
 // ListDeviceTokens returns all enrollment tokens, newest first (never the hash).
+// ListDeviceTokens 只返回有效令牌：吊销后的令牌留在库里做审计，但不再出现在界面上。
 func (d *DB) ListDeviceTokens() ([]DeviceToken, error) {
-	rows, err := d.Query(`SELECT id, label, prefix, created_at, last_seen_at, revoked FROM device_tokens ORDER BY id DESC`)
+	rows, err := d.Query(`SELECT id, label, prefix, created_at, last_seen_at, revoked FROM device_tokens WHERE revoked = false ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}

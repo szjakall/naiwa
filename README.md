@@ -2,191 +2,183 @@
 
 # ✦ Starry
 
-**AI 自主渗透测试平台**
+**AI 自主渗透测试控制台** · 单二进制 · 对话驱动
 
 <img src="web/public/logo.png" alt="Starry" width="160" />
 
-从侦察到报告交付，多智能体自主完成 · 全程可视化 · 可介入 · 可交付
+侦察到报告全程可介入 · Web 站点与安卓设备同一套编排 · 每个动作都有审批与留痕
 
 中文 | [English](README.en.md)
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/szjakall/naiwa?color=success)](https://github.com/szjakall/naiwa/releases/latest)
-[![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Fszjakall%2Fnaiwa-2496ED?logo=docker&logoColor=white)](https://github.com/szjakall/naiwa/pkgs/container/naiwa)
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](go.mod)
-
 
 </div>
 
 ---
 
-## 简介
+## 这是什么
 
-Starry 是一套 AI 自主渗透测试平台：给定授权目标，由规划器 / 工作者 / 主控多智能体围绕**双图架构**（全局资产图 + 每任务探索图）自主完成 侦察 → 攻击面发现 → 利用验证 → 漏洞记录 → **报告交付**，全程可视化、可介入、可交付。
+Starry 是一个自托管的渗透测试控制台：**Go 单二进制内嵌 Next.js 前端**，数据落 PostgreSQL。
+你在「对话」页给一名 agent 一句话，它在目标上执行动作——Web 站点走 HTTP/MITM 流量，安卓设备走反连通道——
+选中的动作先过审批门（自动放行 / 人工审批 / AI 判定），产生的资产、发现、报文、报告全部落库。
 
-与多数"擅长发现、止于发现"的自动化渗透工具不同，Starry 把重心放在**交付**——让 AI 挖到的漏洞，变成工程师看得懂、能复现、带证据、可直接交付客户的报告。
+它不等同于"全自动扫描器"：默认每个有副作用的动作都要过审批，产物是可复核的链路而不是一堆标题。
 
-## ✨ v2.0 新特性：证据驱动的交付
+## 能力概览
 
-v2.0 聚焦一件事——**把"挖得到"做成"交得出"**。agent 在挖洞的同时就把复现过程与证据固定下来，工程师的工作也随之从"从零整理报告"转变为"验证确认"。
-
-<div align="center">
-</div>
-
-**① 复现过程就地落库。** agent 执行利用的同时，将每一步的请求、响应、预期结果与验证结论结构化记录入库，而非事后重构，从根本上杜绝复现步骤"拼不全、靠编造"。
-
-**② 发现页按利用链分步呈现。** 漏洞不再是"一条命令加一句结论"，而是从入口点、前置条件到逐步利用的完整链条，每一步以自然语言说明配一个真实请求，工程师打开即可理解漏洞的来源与利用路径。
-
-<div align="center">
-</div>
-
-**③ 每一步自动关联真实流量包。** agent 作业期间发出的全部请求经 MITM 录制完整落库；在记录漏洞的同时，系统按时间窗口与步骤顺序，将每一步精确关联到其对应的真实数据包。点击即可查看原始请求与响应报文，带语法高亮、正文检索与命中计数，无需再回到代理工具重新构造、重新复测。
-
-<div align="center">
-</div>
-
-**④ 证据即报文。** 对敏感信息泄露这类漏洞，流量报文本身就是证据，不必再事后截图拼凑。
-
-<div align="center">
-</div>
-
-**⑤ 人工级三语报告。** AI 叙述 + python-docx 排版成交付级 `.docx`（封面 / 目录 / 页码 / 每漏洞属性表与结构化复现），支持简体 / 繁体 / 英文整份报告。
-
-> 以上界面数据均为本地靶场的合成演示数据。
+| 模块 | 实际做什么 |
+| --- | --- |
+| 对话编排 | 每条对话独立设置 **Agent / 审批模式 / 形态（Web·安卓）/ 绑定设备**；同一操作员可一条全自动、另一条逐条审批 |
+| 目标推进 | 一句话目标 + 轮次预算（1/2/3/5/8/10 或**不限**）自动续跑；收敛条件：某轮无工具调用、预算用尽、出错或手动停止 |
+| 审批门 | `auto` 全放行 / `review` 阻塞等人工（10 分钟超时）/ `ai` 由模型判定，异常一律拒绝；覆盖 Bash、文件写入、设备命令等副作用工具 |
+| 安卓设备 | 设备端 App 反连控制台；agent 可调 7 个设备工具；面板上可执行命令、截屏、拉日志、列应用、读写文件、抓包与 TCP 隧道 |
+| MCP | stdio / HTTP 两种传输，工具自动发现；内置示例已接 170 项逆向工程工具、浏览器、文件系统、GitHub |
+| 任务 / 资产 / 发现 | 任务下挂资产与发现，严重度四级、复现步骤与真实报文关联 |
+| 流量 | 内置 MITM 录制（默认 `:8788`），请求响应落库、可在页面检索 |
+| 报告 | AI 叙述 + Python 渲染成交付级 `.docx`（封面/目录/页码/属性表），支持简 / 繁 / 英 |
+| 知识库 | pgvector 可用时语义检索，不可用自动降级关键词检索 |
+| 用户与合规 | RBAC 多用户、权限矩阵、登录审计、拦截规则、审批记录、实时日志 |
+| 自更新 | 二进制内一键升级，带校验与回滚位 |
 
 ## 快速开始
 
-依赖 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 的「LLM 配置」页填）。生成 `.docx` 报告需 `python3` + `python-docx`（Docker 镜像已内置）。
+前置：**PostgreSQL 14+**、**LLM 凭据**（Anthropic / OpenAI 兼容接口任选，也可在 UI 里配）。
+生成 `.docx` 报告需要 `python3` + `python-docx`（Docker 镜像已内置）。
 
-### 方式一：Docker 一键部署（推荐）
+### 方式一：Docker（推荐）
 
 ```bash
 curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/docker-compose.yml
 curl -O https://raw.githubusercontent.com/szjakall/naiwa/main/.env.example
-cp .env.example .env          # 设 POSTGRES_PASSWORD
-docker compose up -d          # 自动拉镜像 + PostgreSQL 并启动
+cp .env.example .env          # 至少改 POSTGRES_PASSWORD
+docker compose up -d
 ```
 
-打开 **http://localhost:8787**，首次进入 `/setup` 设置管理员密码。
+打开 `http://localhost:8787`，首次进入 `/setup` 设置管理员密码。
+镜像自带 Chromium 与 Playwright，浏览器类 MCP 开箱可用。
 
-### 方式二：下载预编译二进制
+### 方式二：预编译二进制
 
-到 [Releases](https://github.com/szjakall/naiwa/releases/latest) 下载对应平台 zip（Linux amd64/arm64 · macOS amd64/arm64 · Windows amd64），解压后：
+到 [Releases](https://github.com/szjakall/naiwa/releases/latest) 下载对应平台包，解压后：
 
 ```bash
-cp config.example.json config.json    # 填好 database 连接
-./starry                             # Windows 为 starry.exe
+cp config.example.json config.json   # 填 database 连接
+./starry -addr :8787 -data ./data
 ```
 
-打开 **http://localhost:8787**。
+数据库连接也可用环境变量覆盖：`STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`。
 
 ### 方式三：从源码构建
 
-本项目**完整源码开放**（AGPL-3.0）。前置 Go 1.24+ / Node 20+ / PostgreSQL / Python 3（报告渲染）：
+前置 Go 1.24+、Node 20+、PostgreSQL：
 
 ```bash
-cd web && NEXT_EXPORT=1 npx next build && cd ..    # 前端静态导出
-cp -r web/out/. server/webui/dist/                 # 内嵌前端
-CGO_ENABLED=0 go build -tags embedui -o starry ./cmd/starry
-./starry
+cd web
+npm install
+npm run build:static                 # 静态导出到 web/out（构建期不访问外网）
+cd ..
+
+rm -rf server/webui/dist && mkdir -p server/webui/dist
+cp -r web/out/. server/webui/dist/   # 前端内嵌
+
+rm -rf server/skillsdist && mkdir -p server/skillsdist
+cp -r skills/. server/skillsdist/    # 内置 skill 内嵌
+
+CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
+./starry -addr :8787 -data ./data
 ```
 
-完整步骤（含 skill 内嵌、开发热更新）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+完整步骤与开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 更多界面
+## 首次使用
 
-| 仪表盘 | 任务 |
-| :---: | :---: |
+1. `/setup` 设置管理员密码 → 登录
+2. **系统 → LLM**：填接口地址、模型、密钥，设为默认档案
+3. **对话 → 新建对话**：目标条上选 Agent、审批模式、形态
+4. 输入目标，选轮次预算，点「自主推进」；运行中可在活动流里看到每一步工具调用
+5. 产物在 **任务 / 资产 / 发现 / 流量** 里，报告在 **系统 → 报告管理** 生成
 
-## 源起
+## 接入安卓设备
 
-Starry 自开源项目 ARTEX（作者 [@Autumn-27](https://github.com/Autumn-27)）的 **v0.1.1 起二次开发**，此后持续跟进上游演进，期间与上游相互交流借鉴。在此坦诚致谢原作者的奠基性工作。
+设备端是一个独立 APK（`device/`，约 41KB），通过 WebSocket 反连控制台。
 
-需要说明的是，"自动发现"与"报告交付"本是两类目标：ARTEX 把发现做得很强，而交付更贴近具体项目、因客户而异。Starry 正是在其优秀底座之上，把工程重心补在了"交付"这一环。
+```bash
+# 1. 签发令牌（控制台 → 功能 → 安卓设备 → 接入令牌）
+#    明文只显示一次，服务端只存 sha256
 
-## 相对 ARTEX 的改进
+# 2. 构建设备端 APK（需要 Android SDK + build-tools）
+cd device
+ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh     # 产物 build/starry-droid.apk
+adb install -r build/starry-droid.apk
 
-在继承其优秀底座（探索图引擎、MITM 流量录制、规则化 HITL 拦截、多智能体编排）的基础上，Starry 主要增强：
+# 3. App 里填控制台地址与令牌
+#    ws://<控制台地址>:8787/ws/droid
+```
 
-| 方面 | 说明 |
+设备在线后，面板上可直接执行命令、截屏、拉日志、列应用、读写文件、抓包；
+对话里把形态选成「安卓设备」，agent 就会走设备通道而不是 HTTP。
+
+已能对齐的协议动作：`exec` `pull` `push` `screencap` `logcat` `packages`
+`capture_start/stop/status` `tcp_open/send/close`。
+
+## 目录结构
+
+```
+cmd/starry/      入口与命令行参数
+server/          HTTP API、路由、审批门、设备通道、MCP 接入、更新
+agent/           agent 运行时（对话、工具装配、记忆）
+engine/          事件驱动引擎与工具实现（含 device 工具）
+guard/           副作用动作的审批与危险命令拦截
+droid/           安卓反连协议（帧编解码、设备注册表、TCP 隧道）
+db/              PostgreSQL schema 与数据访问
+config/          配置加载（config.json / 环境变量）
+report/          报告模型与 .docx 渲染（调用 python-docx）
+integrations/    内置 MCP 集成（rea）
+web/             Next.js 前端（静态导出后内嵌进二进制）
+skills/          内置 skill 库（内嵌进二进制）
+device/          安卓设备端源码与构建脚本
+deploy/          systemd 单元示例
+```
+
+## 配置
+
+| 来源 | 说明 |
 | --- | --- |
-| **证据驱动的交付** | 复现过程就地落库、发现页按利用链分步、每步自动关联真实流量包（语法高亮 / 正文检索 / 命中计数） |
-| **人工级报告** | AI 叙述 + python-docx 排版成交付级 .docx（封面 / 目录 / 页码 / 每漏洞属性表），支持简 / 繁 / 英整份 |
-| 报告管理 | 组织级设置、命名模版（出具方 / logo / 人员 / CVSS）、按任务生成、勾选收录漏洞子集 |
-| 漏洞管理深化 | AI 富化成结构化数据（CVSS / 影响 / 修复 / 结构化复现）、四级严重度、批量富化、会话漏洞补录 |
-| 三语国际化 | 全站简体 / 繁体 / 英文 |
-| 多用户权限（RBAC） | 可视化权限矩阵自定义角色、系统角色、资源级范围、登录审计 |
-| 知识库检索增强 | 全局 + 任务双层 pgvector RAG，为 Agent 提供领域知识 |
+| `config.json` | 数据库连接（分字段或 `database.dsn`） |
+| `STARRY_PG_DSN` | 环境变量优先级高于 `config.json` |
+| `-addr` | 监听地址，默认 `:8787` |
+| `-proxy` | MITM 录制端口，默认 `:8788`；传空串关闭 |
+| `-data` | 数据目录（JWT 密钥、流量、抓包、报告），默认可执行文件旁的 `data/` |
+| `STARRY_LLM_*` | LLM 默认值（provider / model / base_url / proxy），也可在 UI 配置 |
 
-## 技术架构
+## 常见问题
 
-Go 单体后端（`go:embed` 内嵌 Next.js 前端）+ PostgreSQL。核心是**双图架构**：全局共享的资产图（跨任务的资产真值库）与每任务独立的探索图（目标 / 意图 / 事实 / 漏洞的推进血缘链），两图靠锚点互连。引擎事件驱动——图一变就唤醒规划器派意图，工作者领意图执行并把结果写回，写回再触发下一轮，直到目标被证明。
+**构建时前端报 `module not found` 与字体相关**：本项目前端已改为本机字体栈，构建期不访问外网；若你改动过 `web/src/lib/fonts`，请保持无网络依赖。
 
-```mermaid
-flowchart TB
-  subgraph FE[前端 Next.js · go:embed 内嵌单二进制]
-    UI[仪表盘 · 任务 · 发现 · 资产 · 流量 · 报告 · 知识库]
-  end
-  subgraph SRV[server · Go net/http]
-    API[REST /api · JWT · SSE]
-    ENG[engine 事件驱动调度]
-  end
-  subgraph AG[多智能体编排]
-    PL[planner 规划 · 唯一产意图]
-    WK[worker 执行 ×N]
-    MA[mainagent 人机接口]
-  end
-  subgraph DB[PostgreSQL]
-    AGRAPH[资产图 · 全局共享]
-    EGRAPH[探索图 · 每任务独立]
-  end
-  SUB[MITM 流量录制 · HITL 拦截 · 资产补全 · 报告 · 知识库 RAG]
+**前端构建被 OOM kill**：TypeScript 检查吃内存，`NODE_OPTIONS=--max-old-space-size=3072`；内存小于 4G 的机器建议加 swap。
 
-  UI --> API --> ENG --> PL & WK
-  API --> MA
-  PL & WK & MA --> DB
-  WK --> SUB
-```
+**设备连不上**：确认 App 里填的是 `ws://<地址>:8787/ws/droid`（不是页面地址），令牌未被吊销，服务端日志里有对应握手记录。
 
-## 核心能力
+**令牌列表为空但有设备在线**：列表只显示未吊销令牌；吊销记录留在库里做审计。
 
-- 双图架构：全局共享资产图 + 每任务独立探索图，靠锚点互连
-- 多智能体编排：事件驱动引擎，planner 产意图 / N 个 worker 执行 / mainagent 人机接口
-- 证据驱动交付：复现就地落库、发现页利用链分步、每步关联真实流量包
-- 人工级三语报告：AI 叙述 + python-docx 交付级 .docx
-- MITM 流量录制、规则化 HITL 拦截、MCP / Skill 扩展体系、pgvector 知识库
+**报告生成失败**：检查宿主机是否有 `python3` 与 `python-docx`。
 
-## 关注公众号
+## 安全与合规
 
-更多 Starry 的实战复盘、功能解析与版本更新，欢迎关注我们的微信公众号：
+- 仅用于**已获授权**的目标。默认审批门就是为这个设计的：不要为了省事把全站都设成 `auto`。
+- 设备通道与抓包能力等价于设备上的命令行权限，令牌泄露即等于设备失守；请按凭据管理对待。
+- 发现的问题请按流程修复并在复测后关闭，报告里的证据（报文、截图）可能含敏感数据。
 
-<div align="center">
-<br/>
-<sub>微信扫码关注 · <b>Starry</b></sub>
-</div>
+## 许可
 
-## 致谢
+**AGPL-3.0**，详见 [LICENSE](LICENSE)。使用、修改、再分发（含以网络服务形式提供）须遵守该协议条款。
 
-- ARTEX（作者 [@Autumn-27](https://github.com/Autumn-27)）—— 本项目的技术基座。
+本项目在开源社区既有成果之上持续二次开发，感谢上游作者与所有贡献者。
 
-## 许可与免责声明
+## 免责声明
 
-本项目基于 **AGPL-3.0** 协议开源，详见 [LICENSE](LICENSE)。使用、修改与再分发（含以网络服务形式提供）须遵守该协议条款。
-
-**Starry 仅供个人学习、代码研究与本地技术验证使用，不得用于对任何线上系统或网站发起实际测试。**
-
-### 允许使用范围
-- 仅可用于阅读、学习与研究本项目，以及在本地隔离环境中进行技术原理验证；
-- 适用于个人学习、学术研究等非攻击性用途。
-
-### 禁止事项
-- 严禁使用本工具对任何网站、线上服务或联网系统发起扫描、探测、利用或攻击；
-- 严禁将本工具用于任何实际的渗透测试、攻防对抗或生产环境；
-- 严禁用于非法入侵、数据窃取、勒索、拒绝服务或任何破坏性、犯罪性活动；
-- 严禁利用本工具从事违反所在国家 / 地区法律法规的行为。
-
-### 合规责任
-使用者须自行遵守所在国家 / 地区关于网络安全、数据保护与计算机犯罪的全部法律法规。因使用本项目产生的一切法律责任与后果，均由使用者自行承担。
-
-### 免责声明
-本项目按"现状（AS IS）"提供，不附带任何明示或默示的担保。作者及贡献者不对使用本工具所导致的任何直接或间接损失、数据丢失、系统损坏或法律纠纷承担责任。下载、安装或使用本项目，即表示你已阅读、理解并同意上述全部条款。
+本项目按"现状（AS IS）"提供，不附带任何明示或默示担保。
+使用者须自行遵守所在国家 / 地区关于网络安全与数据保护的法律法规，并对使用行为及其后果负责。
+严禁将本项目用于未授权测试、非法入侵、数据窃取或任何破坏性活动。

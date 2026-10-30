@@ -682,7 +682,10 @@
       "idle": "未启动",
       "running": "运行中",
       "paused": "已暂停",
-      "done": "已完成"
+      "done": "已完成",
+      "rounds": "轮",
+      "budgetHint": "轮次预算：每轮是一次完整的模型执行；没有工具调用的那一轮会提前停下",
+      "unlimited": "不限"
     }
   },
   "transcript": {

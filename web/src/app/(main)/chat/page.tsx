@@ -372,6 +372,7 @@ function GoalBar({ conv, onChanged }: { conv: Conversation; onChanged: () => voi
   const [goal, setGoal] = React.useState(conv.goal ?? "");
   const [busy, setBusy] = React.useState(false);
   const [status, setStatus] = React.useState(conv.goal_state?.status ?? "idle");
+  const [limit, setLimit] = React.useState(conv.goal_state?.round_limit ?? 3);
   const [note, setNote] = React.useState(conv.goal_state?.last_note ?? "");
   const [round, setRound] = React.useState(conv.goal_state?.round ?? 0);
 
@@ -386,8 +387,8 @@ function GoalBar({ conv, onChanged }: { conv: Conversation; onChanged: () => voi
     if (!goal.trim() || busy) return;
     setBusy(true);
     try {
-      await api.setConversationGoal(conv.id, goal.trim(), 3);
-      await api.runConversationGoal(conv.id, 3);
+      await api.setConversationGoal(conv.id, goal.trim(), limit);
+      await api.runConversationGoal(conv.id, limit);
       setStatus("running");
       setNote("");
       // 轮次在后台跑：每 3 秒读一次状态，running 结束就停。
@@ -419,12 +420,25 @@ function GoalBar({ conv, onChanged }: { conv: Conversation; onChanged: () => voi
         className="h-8 min-w-[240px] flex-1 text-xs"
         disabled={busy}
       />
+      <select
+        value={limit}
+        onChange={(e) => setLimit(Number(e.target.value))}
+        disabled={busy}
+        title={t("chat.goal.budgetHint")}
+        className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+      >
+        {[0, 1, 2, 3, 5, 8, 10].map((n) => (
+          <option key={n} value={n}>
+            {n === 0 ? t("chat.goal.unlimited") : `${n} ${t("chat.goal.rounds")}`}
+          </option>
+        ))}
+      </select>
       <Button size="sm" onClick={() => void start()} disabled={busy || !goal.trim()}>
         {busy ? t("chat.goal.starting") : t("chat.goal.start")}
       </Button>
       <span className="text-muted-foreground text-[11px]">
         {label}
-        {round > 0 ? ` · ${round}/3` : ""}
+        {round > 0 ? ` · ${round}/${limit > 0 ? limit : "∞"}` : ""}
         {note ? ` · ${note}` : ""}
       </span>
     </div>
@@ -853,11 +867,8 @@ export default function ChatPage() {
   }
 
   return (
-    <div
-      data-content-padding="false"
-      className="flex h-[calc(100svh-3rem)] flex-col overflow-hidden p-4 md:h-[calc(100svh-4rem)] md:p-6"
-    >
-      <div className="grid min-h-0 flex-1 grid-cols-[18rem_1fr] grid-rows-[minmax(0,1fr)] gap-4">
+    <div data-full-bleed="" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[17rem_1fr] grid-rows-[minmax(0,1fr)] gap-3">
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
           <div className="border-b p-2">

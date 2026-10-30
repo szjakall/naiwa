@@ -670,7 +670,7 @@ export default function DashboardPage() {
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-1 flex-col gap-4 pb-6">
+    <div data-full-bleed="" className="flex flex-1 flex-col gap-4 pb-6">
 
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center justify-between gap-3">

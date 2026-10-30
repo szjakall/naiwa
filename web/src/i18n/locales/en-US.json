@@ -682,7 +682,10 @@
       "idle": "Not started",
       "running": "Running",
       "paused": "Paused",
-      "done": "Done"
+      "done": "Done",
+      "rounds": "rounds",
+      "budgetHint": "Round budget: one round is one full model run; a round with no tool calls stops early",
+      "unlimited": "Unlimited"
     }
   },
   "transcript": {

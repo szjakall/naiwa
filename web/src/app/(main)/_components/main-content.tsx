@@ -28,6 +28,11 @@ function isFullBleed(pathname: string) {
   return p.startsWith("/function/tasks/detail");
 }
 
+// 聊天页自己管理内边距与高度：外边距给小一点，避免会话框两侧出现大片空白。
+function isChatPage(pathname: string) {
+  return pathname.startsWith("/chat");
+}
+
 export function MainContent({ children }: { children: ReactNode }) {
   const currentUser = useCurrentUser();
   const pathname = usePathname();
@@ -36,9 +41,14 @@ export function MainContent({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
+  // 工作区页面（聊天 / 仪表盘）占满宽度：centered 布局的 max-w 只作用于其余页面，
+  // 否则宽屏上会话框两侧会留出很大空白。
+  const workspace = pathname.startsWith("/chat") || pathname.startsWith("/dashboard");
+
   return (
     <>
       <header
+        data-full-bleed={workspace ? "" : undefined}
         className={cn(
           "flex h-12 shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12",
           "[html[data-navbar-style=sticky]_&]:sticky [html[data-navbar-style=sticky]_&]:top-0 [html[data-navbar-style=sticky]_&]:z-50 [html[data-navbar-style=sticky]_&]:overflow-hidden [html[data-navbar-style=sticky]_&]:rounded-t-[inherit] [html[data-navbar-style=sticky]_&]:bg-background/50 [html[data-navbar-style=sticky]_&]:backdrop-blur-md",
@@ -61,7 +71,14 @@ export function MainContent({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
-      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden p-4 has-data-[content-padding=false]:p-0 md:p-6 md:has-data-[content-padding=false]:p-0">
+      <div
+        data-full-bleed={workspace ? "" : undefined}
+        className={cn(
+          "min-h-0 min-w-0 flex-1 overflow-x-hidden",
+          isChatPage(pathname) ? "p-2 md:p-3" : "p-4 md:p-6",
+          "has-data-[content-padding=false]:p-0 md:has-data-[content-padding=false]:p-0",
+        )}
+      >
         {children}
       </div>
     </>

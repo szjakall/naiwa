@@ -69,7 +69,7 @@ export const PREFERENCE_DEFAULTS: PreferenceValueMap = {
   theme_mode: "light",
   theme_preset: "default",
   font: "geist",
-  content_layout: "centered",
+  content_layout: "full-width",
   navbar_style: "sticky",
   sidebar_variant: "inset",
   sidebar_collapsible: "icon",
