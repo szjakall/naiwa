@@ -2010,6 +2010,17 @@
     "noHandshake": "TLS handshake not captured (capture started after the connection), ciphertext only",
     "requestPacket": "Request",
     "responsePacket": "Response",
-    "emptyPacket": "(no data in this direction)"
+    "emptyPacket": "(no data in this direction)",
+    "noDevice": "no device online",
+    "startCapture": "Start capture",
+    "pullNow": "Pull now",
+    "stopCapture": "Stop & save",
+    "captureTip": "Captured data only appears in the list after Pull now / Stop & save",
+    "starting": "capture started…",
+    "capturingHint": "capturing: browse on the phone, then hit Pull now",
+    "pulling": "pulling…",
+    "pulled": "pulled {name} ({size})",
+    "stopping": "stopping…",
+    "stopped": "stopped and saved {name}"
   }
 }

@@ -41,6 +41,17 @@ Starry 是自主渗透测试控制台：会话 → 项目（任务）→ 资产 
 - 实测同一份抓包：111.30.187.245:8080 ↑436 B ↓200 B、211.95.34.130:443 ↑1016 B ↓824 B
   （修前第二条是 ↓0 B）
 
+### 安卓流量：抓包不再"看不见"
+
+- **根因**：设备端 tcpdump 把 pcap 写在手机上，只有 `capture_stop` 时才拉回控制台；
+  抓包进行中不点停止，列表里就没有任何记录
+- 新增 `POST /api/android/captures/pull` 与设备操作 `capture_pull`：**不打断抓包**，
+  先拉一份当前快照（文件名 `live-<时间>.pcap`）
+- 安卓流量页顶部加抓包控制条：选设备 → 开始抓包 / 拉取当前 / 停止并保存，
+  并提示"要拉取或停止后才会出现在列表"
+- 实测同一份设备抓包（286 报文）：DNS 解析出 `neverssl.com`、`example.com`；
+  TLS 通过 SNI 解析出 `security.browser.miui.com`、`neverssl.com`、`example.com`
+
 ### 部署
 
 - **默认 Docker 部署**：`Dockerfile` 改成多阶段（Node 22 构建前端 → Go 1.26 编单二进制 →

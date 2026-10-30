@@ -281,6 +281,8 @@ export const api = {
         (adv?.respMax ? `&resp_max=${adv.respMax}` : "") +
         (adv?.body ? `&body=${encodeURIComponent(adv.body)}` : ""),
     ),
+  androidCapturePull: (device: string) =>
+    post<{ ok: boolean; capture: { name: string; size: number } }>("/android/captures/pull", { device }),
   androidCaptures: () => get<{ captures: AndroidCapture[] }>("/android/captures"),
   androidFlows: (name: string, limit = 500) =>
     get<AndroidCaptureDetail>(`/android/captures/${encodeURIComponent(name)}/flows?limit=${limit}`),

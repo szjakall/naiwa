@@ -650,6 +650,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
 	mux.HandleFunc("GET /api/traffic/upstream", s.getTrafficUpstream)
 	mux.HandleFunc("GET /api/android/captures", s.androidCaptures)
+	mux.HandleFunc("POST /api/android/captures/pull", s.androidCapturePull)
 	mux.HandleFunc("GET /api/android/captures/{name}/flows", s.androidCaptureFlows)
 	mux.HandleFunc("GET /api/android/captures/{name}/download", s.androidCaptureDownload)
 	mux.HandleFunc("DELETE /api/android/captures/{name}", s.androidCaptureDelete)

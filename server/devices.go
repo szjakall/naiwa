@@ -128,8 +128,12 @@ var deviceOps = map[string]time.Duration{
 	"packages":       30 * time.Second,
 	"capture_start":  40 * time.Second,
 	"capture_stop":   90 * time.Second,
+	"capture_pull":   90 * time.Second,
 	"capture_status": 15 * time.Second,
 }
+
+// capturePathOnDevice 与设备端 Handlers.CAPTURE_PATH 保持一致。
+const capturePathOnDevice = "/data/local/tmp/starry-capture.pcap"
 
 // callDevice 把一次控制台操作翻译成设备协议请求并等待结果。
 func (s *Server) callDevice(ctx context.Context, key, op string, args map[string]any) (droid.Result, error) {
@@ -226,6 +230,11 @@ func (s *Server) callDevice(ctx context.Context, key, op string, args map[string
 	case "capture_stop":
 		// 设备会先回 result，再以 data 帧流回 pcap；hub 会把分片聚合进 Bytes。
 		return dev.Call(ctx, map[string]any{"t": "capture_stop"}, timeout)
+	case "capture_pull":
+		// 只读设备侧正在写的 pcap，不杀掉 tcpdump：抓包期间也能先看一眼。
+		return dev.Call(ctx, map[string]any{
+			"t": "pull", "path": capturePathOnDevice, "maxBytes": 64 * 1024 * 1024,
+		}, timeout)
 	case "capture_status":
 		return dev.Call(ctx, map[string]any{"t": "capture_status"}, timeout)
 	}
@@ -338,9 +347,10 @@ func (s *Server) deviceOpData(ctx context.Context, key, op string, args map[stri
 	case "capture_start", "capture_status":
 		out["text"] = res.Stdout
 		out["code"] = res.Code
-	case "capture_stop":
+	case "capture_stop", "capture_pull":
 		// pcap 走 data 帧回流，落盘而不是塞进 JSON：一个抓包几十 MB，
 		// base64 进响应体会把浏览器和日志一起拖垮。
+		// capture_pull 是"抓包进行中先看一眼"：同样落盘，但文件名用 live- 前缀。
 		if len(res.Bytes) == 0 {
 			return nil, errors.New("设备没有返回抓包数据（tcpdump 可能不可用）")
 		}
@@ -349,6 +359,9 @@ func (s *Server) deviceOpData(ctx context.Context, key, op string, args map[stri
 			return nil, err
 		}
 		name := fmt.Sprintf("cap-%s.pcap", time.Now().Format("20060102-150405"))
+		if op == "capture_pull" {
+			name = fmt.Sprintf("live-%s.pcap", time.Now().Format("20060102-150405"))
+		}
 		full := filepath.Join(dir, name)
 		if err := os.WriteFile(full, res.Bytes, 0o644); err != nil {
 			return nil, err

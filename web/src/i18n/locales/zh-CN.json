@@ -2010,6 +2010,17 @@
     "noHandshake": "未捕获到 TLS 握手（抓包窗口在连接建立之后开始），只有密文字节",
     "requestPacket": "请求包",
     "responsePacket": "响应包",
-    "emptyPacket": "（该方向没有数据）"
+    "emptyPacket": "（该方向没有数据）",
+    "noDevice": "无在线设备",
+    "startCapture": "开始抓包",
+    "pullNow": "拉取当前",
+    "stopCapture": "停止并保存",
+    "captureTip": "抓包中的数据要「拉取当前」或「停止并保存」后才会出现在左侧列表",
+    "starting": "已下发抓包…",
+    "capturingHint": "抓包进行中：在手机浏览器访问目标后点「拉取当前」",
+    "pulling": "正在拉取…",
+    "pulled": "已拉取 {name}（{size}）",
+    "stopping": "正在停止…",
+    "stopped": "已停止并保存 {name}"
   }
 }

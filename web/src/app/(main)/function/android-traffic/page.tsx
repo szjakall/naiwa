@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { api } from "@/lib/api";
-import type { AndroidCapture, AndroidFlow } from "@/lib/types";
+import type { AndroidCapture, AndroidFlow, DeviceInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // 安卓流量：设备端 tcpdump 抓到的 pcap，按"一份抓包 → 多条连接"展示。
@@ -62,6 +62,11 @@ export default function AndroidTrafficPage() {
   const [summary, setSummary] = React.useState<AndroidCaptureDetailLite | null>(null);
   const [active, setActive] = React.useState<AndroidFlow | null>(null);
   const [loading, setLoading] = React.useState(false);
+  // 抓包控制：设备端 tcpdump 在写文件，必须"拉取"或"停止"后才会落到控制台列表。
+  const [devices, setDevices] = React.useState<DeviceInfo[]>([]);
+  const [deviceKey, setDeviceKey] = React.useState("");
+  const [capturing, setCapturing] = React.useState(false);
+  const [capNote, setCapNote] = React.useState("");
 
   const loadCaptures = React.useCallback(async () => {
     try {
@@ -74,6 +79,14 @@ export default function AndroidTrafficPage() {
 
   React.useEffect(() => {
     void loadCaptures();
+    void api
+      .devices()
+      .then((list) => {
+        setDevices(list);
+        if (!deviceKey && list.length > 0) setDeviceKey(list[0].key);
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadCaptures]);
 
   const openCapture = React.useCallback(async (name: string) => {
@@ -100,6 +113,49 @@ export default function AndroidTrafficPage() {
       setLoading(false);
     }
   }, []);
+
+  async function startCapture() {
+    if (!deviceKey) return;
+    try {
+      setCapNote(t("androidTraffic.starting"));
+      await api.deviceOp(deviceKey, "capture_start", {});
+      setCapturing(true);
+      setCapNote(t("androidTraffic.capturingHint"));
+    } catch (e) {
+      setCapNote("");
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function pullLive() {
+    if (!deviceKey) return;
+    try {
+      setCapNote(t("androidTraffic.pulling"));
+      const res = await api.androidCapturePull(deviceKey);
+      setCapNote(t("androidTraffic.pulled", { name: res.capture?.name ?? "", size: fmtSize(res.capture?.size ?? 0) }));
+      await loadCaptures();
+      if (res.capture?.name) await openCapture(res.capture.name);
+    } catch (e) {
+      setCapNote("");
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function stopCapture() {
+    if (!deviceKey) return;
+    try {
+      setCapNote(t("androidTraffic.stopping"));
+      const res = await api.deviceOp(deviceKey, "capture_stop", {});
+      setCapturing(false);
+      const name = (res.data as { name?: string } | undefined)?.name;
+      setCapNote(t("androidTraffic.stopped", { name: name ?? "" }));
+      await loadCaptures();
+      if (name) await openCapture(name);
+    } catch (e) {
+      setCapNote("");
+      toast.error((e as Error).message);
+    }
+  }
 
   async function removeCapture(name: string) {
     try {
@@ -128,6 +184,35 @@ export default function AndroidTrafficPage() {
           <RefreshCwIcon className="size-3.5" />
           {t("androidTraffic.refresh")}
         </Button>
+      </div>
+
+      {/* 抓包控制条：设备端抓的数据必须先"拉取/停止"才会出现在列表里 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-xs">
+        <SmartphoneIcon className="size-4 text-muted-foreground" />
+        <select
+          value={deviceKey}
+          onChange={(e) => setDeviceKey(e.target.value)}
+          className="border-input bg-background h-7 rounded-md border px-2 text-xs"
+        >
+          {devices.length === 0 && <option value="">{t("androidTraffic.noDevice")}</option>}
+          {devices.map((d) => (
+            <option key={d.key} value={d.key}>
+              {d.model || d.key}
+            </option>
+          ))}
+        </select>
+        <Button size="sm" variant="outline" disabled={!deviceKey || capturing} onClick={() => void startCapture()}>
+          {t("androidTraffic.startCapture")}
+        </Button>
+        <Button size="sm" variant="outline" disabled={!deviceKey} onClick={() => void pullLive()}>
+          {t("androidTraffic.pullNow")}
+        </Button>
+        <Button size="sm" variant="outline" disabled={!deviceKey} onClick={() => void stopCapture()}>
+          {t("androidTraffic.stopCapture")}
+        </Button>
+        <span className={cn("text-[11px]", capturing ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
+          {capNote || t("androidTraffic.captureTip")}
+        </span>
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-[18rem_1fr] gap-4">
