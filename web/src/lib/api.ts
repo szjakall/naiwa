@@ -147,7 +147,7 @@ export function sseUrl(path: string): string {
   const base =
     process.env.NEXT_PUBLIC_SSE_BASE ??
     (typeof window !== "undefined"
-      ? `${window.location.protocol}//${window.location.hostname}:8787`
+      ? `${window.location.protocol}//${window.location.hostname}:8848`
       : "");
   const token = getToken();
   const sep = path.includes("?") ? "&" : "?";

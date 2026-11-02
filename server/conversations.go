@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"starry/db"
+	"starry/engine/harness"
 	"starry/intercept"
 )
 
@@ -430,9 +431,14 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	}
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancel(intercept.WithConvID(s.ctx, c.ID))
+	ctx, cancelCause := context.WithCancelCause(intercept.WithConvID(s.ctx, c.ID))
+	// 停止接口用 cancelCause 标注"用户手动停止"，活动文案就能说清楚是谁停的。
+	cancel := func() { cancelCause(harness.ErrCancelStopped) }
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
+	// 关键：上一次「手动停止」的标记必须在这里清掉。它原先只写不清，于是任何一次
+	// 手动停止之后，这个会话后续每一轮结束都会被误判成"手动停止"。
+	delete(s.chatStop, busyKey)
 	s.chatMu.Unlock()
 	defer func() {
 		cancel()

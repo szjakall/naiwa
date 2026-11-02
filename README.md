@@ -31,13 +31,16 @@ Starry 是一个自托管的渗透测试控制台：**Go 单二进制内嵌 Next
 | 模块 | 实际做什么 |
 | --- | --- |
 | 对话编排 | 每条对话独立设置 **Agent / 审批模式 / 形态（Web·安卓）/ 绑定设备**；同一操作员可一条全自动、另一条逐条审批 |
-| 目标推进 | 一句话目标 + 轮次预算（1/2/3/5/8/10 或**不限**）自动续跑；收敛条件：某轮无工具调用、预算用尽、出错或手动停止 |
+| 目标推进 | 一句话目标 + 轮次上限（1/2/3/5/8/10 或**不限**）自动续跑；**没有时间预算**，也不会因为某轮没调工具就停——只有出错或你点「停止」才结束；服务重启后会自动续跑 |
 | 审批门 | `auto` 全放行 / `review` 阻塞等人工（10 分钟超时）/ `ai` 由模型判定，异常一律拒绝；覆盖 Bash、文件写入、设备命令等副作用工具 |
 | 安卓设备 | 设备端 App 反连控制台；agent 可调 7 个设备工具；面板上可执行命令、截屏、拉日志、列应用、读写文件、抓包与 TCP 隧道 |
 | MCP | stdio / HTTP 两种传输，工具自动发现；内置示例已接 170 项逆向工程工具、浏览器、文件系统、GitHub |
 | 任务 / 资产 / 发现 | 任务下挂资产与发现，严重度四级、复现步骤与真实报文关联 |
-| 流量 | 内置 MITM 录制（默认 `:8788`），请求响应落库、可在页面检索 |
-| 报告 | AI 叙述 + Python 渲染成交付级 `.docx`（封面/目录/页码/属性表），支持简 / 繁 / 英 |
+| 附件 | 输入框左侧 📎 上传（单文件 ≤32MB），落盘后正文自动附文件清单，agent 用 Read/Bash 直接读原文件 |
+| 实时推送 | 活动产生即经 SSE 推到页面；WebSocket 不可用时自动退回 5s 轮询兜底 |
+| 子任务并行 | `subtask_spawn` / `subtask_join` / `subtask_list`：把互不依赖的子目标交给独立 worker 并行跑（并发上限 4，各自独立上下文，仍走同一审批门） |
+| 流量 | 内置 MITM 录制（默认 `:18889`），请求响应落库、可在页面检索；另有**安卓侧抓包**：设备 tcpdump 落盘 → 拉回控制台解析 HTTP/TLS/DNS，按请求/响应两栏对照 |
+| 报告 | AI 叙述 + Python 渲染成交付级 `.docx`（封面/目录/页码/属性表），支持简 / 繁 / 英；支持**单条导出与多选批量导出** |
 | 知识库 | pgvector 可用时语义检索，不可用自动降级关键词检索 |
 | 用户与合规 | RBAC 多用户、权限矩阵、登录审计、拦截规则、审批记录、实时日志 |
 | 自更新 | 二进制内一键升级，带校验与回滚位 |
@@ -52,12 +55,15 @@ cp .env.example .env          # 至少改 POSTGRES_PASSWORD
 docker compose up -d --build  # 首次构建约 3–8 分钟（拉依赖 + 编前端）
 ```
 
-打开 `http://localhost:8787`，首次进入 `/setup` 设置管理员密码。
+打开 `http://localhost:8848`，首次进入 `/setup` 设置管理员密码。
 
-| 端口 | 用途 |
-| --- | --- |
-| `8787` | 控制台（Web UI + API） |
-| `8788` | MITM 抓包代理（把浏览器/工具指向它即可录制流量） |
+| 端口 | 用途 | 默认 |
+| --- | --- | --- |
+| 控制台 | Web UI + API | `8848`（容器内），宿主端口由 `.env` 的 `STARRY_PORT` 决定 |
+| 抓包代理 | 把浏览器/工具指向它即可录制流量 | `18889`（容器内），宿主端口由 `STARRY_PROXY_PORT` 决定 |
+
+> 端口只在 `.env` 里改，默认 `STARRY_PORT=8848`、`STARRY_PROXY_PORT=18889`；
+> 容器内始终监听 `8848 / 18889`，**不需要**改 `docker-compose.yml` 或 Dockerfile。
 
 数据落在宿主机 `./data`（JWT 密钥、流量录制、抓包、报告、物化的 skills），
 数据库在 `pgdata` 卷里；`docker compose down` 不会丢数据，重建容器也照旧。
@@ -83,11 +89,22 @@ compose 之外也可能想直接跑一个容器，尤其当数据库已经在宿
 docker run -d --name starry --network host --restart unless-stopped \
   -v /opt/starry/data:/app/data \
   -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
+  starry:latest -addr :8848 -proxy :18889 -data /app/data
+```
+
+上面就是默认端口（控制台 `8848`、抓包 `18889`）。**要换端口时三处一起改**：
+
+```bash
+# 例：控制台 8848、抓包只监听本机 18889
+docker run -d --name starry --network host --restart unless-stopped \
+  -v /opt/starry/data:/app/data \
+  -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
   -e STARRY_HEALTH_PORT=8848 \
   starry:latest -addr :8848 -proxy 127.0.0.1:18889 -data /app/data
 ```
 
 - `-addr` 换了端口就要同步 `STARRY_HEALTH_PORT`，否则容器会显示 unhealthy（服务本身是好的）
+- `-proxy` 传空串（`-proxy ""`）可关闭 MITM 录制
 - `--network host` 下容器直接用宿主端口，注意别和宿主上原有进程抢端口
 - 数据目录挂到宿主后，换镜像/重建容器都不影响 jwt.key、抓包、报告
 
@@ -98,7 +115,7 @@ docker run -d --name starry --network host --restart unless-stopped \
 
 ```bash
 cp config.example.json config.json   # 填 database 连接
-./starry -addr :8787 -data ./data
+./starry -addr :8848 -data ./data
 ```
 
 数据库也可用环境变量指定：`STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`。
@@ -119,7 +136,7 @@ CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
 1. `/setup` 设置管理员密码 → 登录
 2. **系统 → LLM**：填接口地址、模型、密钥，设为默认档案
 3. **对话 → 新建对话**：目标条上选 Agent、审批模式、形态
-4. 输入目标，选轮次预算，点「自主推进」；运行中可在活动流里看到每一步工具调用
+4. 输入目标（可点 📎 附上文件），选轮次上限（含「不限」），点「自主推进」；运行中活动流实时增长，可随时「停止」
 5. 产物在 **任务 / 资产 / 发现 / 流量** 里，报告在 **系统 → 报告管理** 生成
 
 ## 接入安卓设备
@@ -136,7 +153,7 @@ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh     # 产物 build/starry-droid.apk
 adb install -r build/starry-droid.apk
 
 # 3. App 里填控制台地址与令牌
-#    ws://<控制台地址>:8787/ws/droid
+#    ws://<控制台地址>:8848/ws/droid
 ```
 
 设备在线后，面板上可直接执行命令、截屏、拉日志、列应用、读写文件、抓包；
@@ -170,8 +187,9 @@ deploy/          systemd 单元示例
 | --- | --- |
 | `config.json` | 数据库连接（分字段或 `database.dsn`） |
 | `STARRY_PG_DSN` | 环境变量优先级高于 `config.json` |
-| `-addr` | 监听地址，默认 `:8787` |
-| `-proxy` | MITM 录制端口，默认 `:8788`；传空串关闭 |
+| `-addr` | 监听地址，默认 `:8848` |
+| `-proxy` | MITM 录制端口，默认 `:18889`；传空串关闭 |
+| `STARRY_HEALTH_PORT` | 容器 HEALTHCHECK 探测端口，**必须与 `-addr` 一致**（默认 8848） |
 | `-data` | 数据目录（JWT 密钥、流量、抓包、报告），默认可执行文件旁的 `data/` |
 | `STARRY_LLM_*` | LLM 默认值（provider / model / base_url / proxy），也可在 UI 配置 |
 
@@ -181,7 +199,7 @@ deploy/          systemd 单元示例
 
 **前端构建被 OOM kill**：TypeScript 检查吃内存，`NODE_OPTIONS=--max-old-space-size=3072`；内存小于 4G 的机器建议加 swap。
 
-**设备连不上**：确认 App 里填的是 `ws://<地址>:8787/ws/droid`（不是页面地址），令牌未被吊销，服务端日志里有对应握手记录。
+**设备连不上**：确认 App 里填的是 `ws://<地址>:8848/ws/droid`（不是页面地址），令牌未被吊销，服务端日志里有对应握手记录。
 
 **令牌列表为空但有设备在线**：列表只显示未吊销令牌；吊销记录留在库里做审计。
 

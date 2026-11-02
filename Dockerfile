@@ -44,6 +44,7 @@ FROM python:3.12-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates tzdata curl ripgrep jq unzip \
       dnsutils iputils-ping netcat-openbsd whois nmap \
+      nodejs npm \
     && pip install --no-cache-dir python-docx \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,13 +55,13 @@ RUN chmod +x /app/starry
 # 数据目录：JWT 密钥、流量录制、抓包、报告、skills 物化产物
 ENV TZ=Asia/Shanghai
 VOLUME ["/app/data"]
-EXPOSE 8787 8788
+EXPOSE 8848 18889
 
 # 监听端口可被 -addr 覆盖（例如直接跑宿主端口 8848 时），
 # 健康检查跟着 STARRY_HEALTH_PORT 走，避免"服务正常但容器 unhealthy"。
-ENV STARRY_HEALTH_PORT=8787
+ENV STARRY_HEALTH_PORT=8848
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD sh -c 'curl -fsS http://127.0.0.1:${STARRY_HEALTH_PORT}/api/health || exit 1'
 
 ENTRYPOINT ["/app/starry"]
-CMD ["-addr", ":8787", "-proxy", ":8788", "-data", "/app/data"]
+CMD ["-addr", ":8848", "-proxy", ":18889", "-data", "/app/data"]

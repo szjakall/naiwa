@@ -28,11 +28,11 @@ export ANDROID_SDK_ROOT=/opt/android-sdk
 2. 打开 App，填地址与令牌，点「启动反连」
 3. 控制台「在线设备」出现该设备，面板上就能执行命令、截屏、拉日志
 
-**地址怎么填**：`ws://203.0.113.10:8787/ws/droid` 是完整写法，**只填 `203.0.113.10:8787` 也行**——
+**地址怎么填**：`ws://203.0.113.10:8848/ws/droid` 是完整写法，**只填 `203.0.113.10:8848` 也行**——
 App 会自动补 `ws://` 和 `/ws/droid`（`http://`→`ws://`、`https://`→`wss://`）。
-控制台端口取决于你的部署（默认 `8787`，可以改成 `8848` 之类，端口对上即可）。
+控制台端口取决于你的部署（默认 `8848`，端口对上即可）。
 
-> 这条自动补全是真机踩出来的：最初只填了 `203.0.113.10:8787/ws/droid`，`URI.create()` 把
+> 这条自动补全是真机踩出来的：最初只填了 `203.0.113.10:8848/ws/droid`，`URI.create()` 把
 > `203.0.113.10` 当成 scheme 解析，抛 `Illegal character in scheme name at index 0`，
 > 而界面上只有这一句英文，连接一步都没发出去。现在 `DroidClient.normalizeUrl()` 统一补全，
 > 并在界面上显示"地址已补全：xxx → ws://xxx"。
@@ -41,7 +41,7 @@ App 会自动补 `ws://` 和 `/ws/droid`（`http://`→`ws://`、`https://`→`w
 
 ```bash
 adb shell am start -n com.starry.droid/.MainActivity \
-    --es url ws://10.0.2.2:8787/ws/droid --es token <令牌> --ez auto true
+    --es url ws://10.0.2.2:8848/ws/droid --es token <令牌> --ez auto true
 ```
 
 只带 `--ez auto true` 时用已保存的配置，适合"进程被杀后重新打开自动连回去"。
@@ -72,8 +72,8 @@ adb logcat -s starry
 没有公网可达地址时，用 `adb reverse` 把手机回环接到电脑上（控制台仍需可达）：
 
 ```bash
-adb reverse tcp:8787 tcp:8787     # 手机 127.0.0.1:8787 → 电脑 8787
-# App 里填 ws://127.0.0.1:8787/ws/droid
+adb reverse tcp:8848 tcp:8848     # 手机 127.0.0.1:8848 → 电脑 8848
+# App 里填 ws://127.0.0.1:8848/ws/droid
 ```
 
 > 注意：这种方式依赖电脑上的转发链路（`adb reverse` 或你自己的中继进程）。

@@ -59,9 +59,9 @@ func run() int {
 	server.BuildVersion = version // hand the build version to the server (health + update check)
 
 	var (
-		addr    = flag.String("addr", ":8787", "HTTP listen address")
+		addr    = flag.String("addr", ":8848", "HTTP listen address")
 		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
-		proxy   = flag.String("proxy", ":8788", "traffic recording proxy address (empty to disable)")
+		proxy   = flag.String("proxy", ":18889", "traffic recording proxy address (empty to disable)")
 		resetPW = flag.String("reset-admin", "", "重置管理员口令后退出（传新口令；传 \"random\" 自动生成）")
 	)
 	flag.Parse()

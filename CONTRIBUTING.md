@@ -40,10 +40,10 @@ CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
 
 # 5. 运行（数据库用环境变量，dataDir 用持久目录）
 export STARRY_PG_DSN="postgres://starry:starry@localhost:5432/starry?sslmode=disable"
-./starry -addr :8787 -data ./data
+./starry -addr :8848 -data ./data
 ```
 
-打开 `http://localhost:8787`，首次进入 `/setup` 设置管理员密码。
+打开 `http://localhost:8848`，首次进入 `/setup` 设置管理员密码。
 
 不带 `-tags embedui` 时不会内嵌前端，二进制会以 API-only 模式运行（调试后端接口时更快）。
 
@@ -78,7 +78,7 @@ docker compose logs -f starry   # 看启动日志
 
 ```bash
 docker build -t starry:dev --build-arg VERSION=$(git describe --tags --always) .
-docker run --rm -p 8787:8787 -p 8788:8788 -v "$PWD/data:/app/data" starry:dev
+docker run --rm -p 8848:8848 -p 18889:18889 -v "$PWD/data:/app/data" starry:dev
 ```
 
 要点：
@@ -155,10 +155,10 @@ CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
 
 # 5. Run (database via env, persistent dataDir)
 export STARRY_PG_DSN="postgres://starry:starry@localhost:5432/starry?sslmode=disable"
-./starry -addr :8787 -data ./data
+./starry -addr :8848 -data ./data
 ```
 
-Open `http://localhost:8787`; the first visit goes to `/setup`.
+Open `http://localhost:8848`; the first visit goes to `/setup`.
 
 Without `-tags embedui` the binary runs API-only (handy while iterating on the backend).
 

@@ -2,12 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 
+	"starry/db"
 	"starry/engine/agentcore"
 	"starry/engine/harness"
 	"starry/engine/llm"
-	"starry/db"
 )
 
 // captureRun drives one agent turn-to-completion over Session.Prompt and emits a
@@ -110,6 +111,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})
 			}
 		case harness.KindResult:
+			cause := context.Cause(ctx)
 			if ev.Terminal != nil {
 				finalText = ev.Terminal.Text
 				reason = ev.Terminal.Reason
@@ -124,14 +126,37 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				if sum == "" {
 					switch ev.Terminal.Reason {
 					case harness.ReasonAbortedTools, harness.ReasonAbortedStreaming:
-						// interruption (task paused / worker killed / backend restart),
-						// not a real completion — the intent is re-queued (open) or
-						// stopped, so the session icon reflects that, not this run.
-						sum = "（运行被中断：任务暂停 / 终止 / 重启所致；未完成）"
+						// ctx 被取消。具体是谁取消的靠 context.Cause 判断——
+						// 以前一律说"暂停 / 终止 / 重启所致"，用户没法分辨。
+						sum = "（本步被中断：未完成）"
+						switch {
+						case errors.Is(cause, harness.ErrCancelPaused):
+							sum = "（已暂停：本步中断，恢复后会重跑）"
+						case errors.Is(cause, harness.ErrCancelDone):
+							sum = "（任务判定完成，本步中止）"
+						case errors.Is(cause, harness.ErrCancelSettled):
+							sum = "（任务超时收尾，本步中断）"
+						case errors.Is(cause, harness.ErrCancelStopped):
+							sum = "（已手动停止：本步中断）"
+						case errors.Is(cause, harness.ErrCancelKilled):
+							sum = "（已按规划终止本步）"
+						case errors.Is(cause, harness.ErrCancelShutdown):
+							sum = "（服务退出中断，重启后自动续跑）"
+						case errors.Is(cause, context.Canceled):
+							sum = "（服务重启中断，重启后自动续跑）"
+						}
 					case harness.ReasonTimeout, harness.ReasonMaxTurns:
 						// 只在显式配置了预算时才会走到这里（对话已默认不限），
 						// 文案保持中性、不再出现"预算上限"字样。
 						sum = "（本轮结束，已写回事实）"
+					case harness.ReasonModelError:
+						// 模型调用失败（provider 5xx / 超时 / 限流）。这是可操作的信息：
+						// 重试、换 LLM 配置或降并发，而不是让用户对着一句"终态"发呆。
+						sum = "（模型调用失败：本步未完成，可重试或切换 LLM 配置）"
+					case harness.ReasonCompleted:
+						// 模型正常结束但没写文字（常见于只调工具就收尾）：这不算异常，
+						// 用中性文案，别再显示"终态: completed"这种内部枚举。
+						sum = "（本轮结束，未输出文字总结）"
 					default:
 						sum = "（无总结，终态: " + string(ev.Terminal.Reason) + "）"
 					}

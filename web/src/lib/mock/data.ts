@@ -330,7 +330,7 @@ const exchanges = [
 
 export const traffic: TrafficResp = {
   enabled: true,
-  proxy: ":8788",
+  proxy: ":18889",
   count: exchanges.length,
   total: exchanges.length,
   page: 0,

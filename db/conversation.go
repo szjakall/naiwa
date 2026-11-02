@@ -140,6 +140,31 @@ func (d *DB) GetConversationGateInfo(id int64) (string, string, error) {
 	return "auto", agentKey, nil
 }
 
+// RunningGoalConversations 返回目标状态仍是 running、且最近 withinSeconds 秒内
+// 有更新的会话——用于服务重启后把被中断的推进接回来。
+func (d *DB) RunningGoalConversations(withinSeconds int) ([]Conversation, error) {
+	rows, err := d.Query(`
+		SELECT `+convCols+`
+		FROM conversations
+		WHERE goal <> ''
+		  AND goal_state->>'status' = 'running'
+		  AND updated_at > now() - make_interval(secs => $1)
+		ORDER BY updated_at DESC`, withinSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Conversation
+	for rows.Next() {
+		c, err := scanConv(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // SetConversationGoal 保存会话目标（空串表示清除目标）。
 func (d *DB) SetConversationGoal(id int64, goal string) error {
 	_, err := d.Exec(`UPDATE conversations SET goal=$2 WHERE id=$1`, id, goal)

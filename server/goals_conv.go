@@ -1,12 +1,13 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"log"
 	"strings"
 	"time"
 
+	"encoding/json"
+	"net/http"
 	"starry/db"
 )
 
@@ -158,6 +159,19 @@ func (s *Server) runConversationGoal(c *db.Conversation, goal string, limit int,
 		s.chatMu.Lock()
 		stopped := s.chatStop[busyKey]
 		s.chatMu.Unlock()
+		// 服务自己在退出（重启/部署/被 SIGTERM）时，这一轮会被取消——那不是用户操作，
+		// 记录成「服务中断」，重启后由 resumeInterruptedGoals 接着跑。
+		if !stopped && s.ctx.Err() != nil {
+			// 状态必须保持 running：下次启动的 resumeInterruptedGoals 靠这个字段
+			// 找到被打断的目标；写成 paused 就再也不会被接回来了。
+			s.saveGoalState(c.ID, convGoalState{
+				Status: "running", Round: round, RoundLimit: limit, LastNote: "服务中断（非手动停止），重启后续跑",
+			})
+			_, _ = pg.AppendConvActivity(c.ID, db.Activity{
+				Kind: "text", Summary: "⏸ 目标暂停：服务中断（非手动停止），重启后自动续跑",
+			})
+			return
+		}
 		if stopped {
 			s.saveGoalState(c.ID, convGoalState{
 				Status: "paused", Round: round, RoundLimit: limit, LastNote: "已手动停止",
@@ -196,4 +210,53 @@ func goalRoundMessage(goal string, round, limit int) string {
 			"如果已经达成目标，明确写出结论与依据；如果无法推进，说明具体缺什么。",
 		round, limit, goal,
 	)
+}
+
+// resumeInterruptedGoals 在服务启动后把「上一进程还在跑」的目标接回来。
+//
+// 为什么需要：部署/重启会把正在推进的目标打断，进程没了也不会有人写"已暂停"，
+// 于是会话停在 running 状态、实际不动，看起来像"自己停了"。这里主动续跑，
+// 并给一个 24 小时窗口，避免把很久以前的历史会话全部唤醒。
+func (s *Server) resumeInterruptedGoals() {
+	if s.m == nil || s.m.pg == nil {
+		return
+	}
+	convs, err := s.m.pg.RunningGoalConversations(24 * 60 * 60)
+	if err != nil {
+		log.Printf("[goal] 续跑扫描失败: %v", err)
+		return
+	}
+	if len(convs) == 0 {
+		return
+	}
+	log.Printf("[goal] 重启后续跑 %d 个目标会话", len(convs))
+	for _, c := range convs {
+		busyKey := s.convBusyKey(c.ID)
+		s.chatMu.Lock()
+		busy := s.chatBusy[busyKey]
+		if !busy {
+			s.chatBusy[busyKey] = true
+		}
+		s.chatMu.Unlock()
+		if busy {
+			continue
+		}
+		// 续跑沿用这个会话原来的轮次上限（0 = 不限）。
+		limit := 0
+		if len(c.GoalState) > 0 {
+			var st convGoalState
+			if json.Unmarshal(c.GoalState, &st) == nil {
+				limit = st.RoundLimit
+				if st.Round > 1 {
+					// 从打断时的轮次继续，而不是从头数
+					limit = st.RoundLimit
+				}
+			}
+		}
+		conv := c
+		s.saveGoalState(conv.ID, convGoalState{
+			Status: "running", Round: 1, RoundLimit: limit, LastNote: "重启后已自动续跑",
+		})
+		go s.runConversationGoal(&conv, conv.Goal, limit, busyKey)
+	}
 }

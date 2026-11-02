@@ -33,13 +33,16 @@ reviewable chain rather than a pile of titles.
 | Area | What it actually does |
 | --- | --- |
 | Conversations | Per-conversation **agent / approval mode / platform (web·android) / bound device**; one operator can keep one chat fully automatic and another fully reviewed |
-| Goal loop | One-line goal plus a round budget (1/2/3/5/8/10 or **unlimited**); stops when a round makes no tool calls, the budget runs out, or it errors / is stopped |
+| Goal loop | One-line goal plus a round limit (1/2/3/5/8/10 or **unlimited**); there is **no wall-clock budget** and a round with no tool calls does not stop it — only an error or your **Stop** ends it; a service restart resumes it automatically |
 | Approval gate | `auto` allow, `review` blocks for a human (10 min timeout), `ai` asks a model and fails closed; covers Bash, file writes and device commands |
 | Android | Device app dials back to the console; the agent gets 7 device tools, the UI offers shell, screenshot, logcat, packages, file I/O, capture and TCP tunnels |
 | MCP | stdio and HTTP transports with tool discovery; the bundled example wires 170 reverse-engineering tools plus browser, filesystem and GitHub |
 | Tasks / assets / findings | Findings hang off tasks, four severity levels, steps linked to the real packets |
-| Traffic | Built-in MITM recorder (default `:8788`), requests and responses persisted and searchable |
-| Reports | AI narration rendered to delivery-grade `.docx` (cover, TOC, page numbers, attribute tables) in Simplified Chinese, Traditional Chinese or English |
+| Attachments | 📎 button next to the composer (≤32 MB per file); the file is stored, its path list is appended to the message, and the agent reads the original with Read/Bash |
+| Live stream | Activities are pushed over SSE the moment they happen; automatic 5s polling fallback when streaming is unavailable |
+| Parallel subtasks | `subtask_spawn` / `subtask_join` / `subtask_list`: hand independent sub-goals to separate workers (max 4, isolated context, same approval gate) |
+| Traffic | Built-in MITM recorder (default `:18889`), persisted and searchable; plus **Android captures**: on-device tcpdump pulled back and parsed (HTTP/TLS/DNS) with request/response panes |
+| Reports | AI narration rendered to delivery-grade `.docx` (cover, TOC, page numbers, attribute tables) in zh-CN / zh-TW / en; **single and multi-select batch export** |
 | Knowledge | pgvector semantic search when available, keyword search as automatic fallback |
 | Users & audit | RBAC, permission matrix, login audit, intercept rules, approval history, live logs |
 | Self-update | In-binary upgrade with verification and a rollback slot |
@@ -54,12 +57,15 @@ cp .env.example .env          # at least change POSTGRES_PASSWORD
 docker compose up -d --build  # first build takes ~3-8 min
 ```
 
-Open `http://localhost:8787`; the first visit goes to `/setup`.
+Open `http://localhost:8848`; the first visit goes to `/setup`.
 
-| Port | Purpose |
-| --- | --- |
-| `8787` | Console (Web UI + API) |
-| `8788` | MITM recording proxy |
+| Port | Purpose | Default |
+| --- | --- | --- |
+| Console | Web UI + API | `8848` inside the container; host port comes from `STARRY_PORT` in `.env` |
+| Recording proxy | Point a browser/tool at it to record traffic | `18889` inside the container; host port comes from `STARRY_PROXY_PORT` |
+
+> Change ports in `.env` only (defaults: `STARRY_PORT=8848`, `STARRY_PROXY_PORT=18889`).
+> The container always listens on `8848 / 18889`; no Dockerfile or compose edit needed.
 
 State lives in `./data` on the host (JWT key, traffic recordings, captures, reports,
 materialized skills); the database lives in the `pgdata` volume. `docker compose down`
@@ -84,12 +90,23 @@ A bridge network cannot reach the host's `127.0.0.1`, so `--network host` is the
 docker run -d --name starry --network host --restart unless-stopped \
   -v /opt/starry/data:/app/data \
   -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
+  starry:latest -addr :8848 -proxy :18889 -data /app/data
+```
+
+Those are the defaults (console `8848`, proxy `18889`). To use different ports, change **three** places:
+
+```bash
+# console on 8848, proxy bound to loopback only
+docker run -d --name starry --network host --restart unless-stopped \
+  -v /opt/starry/data:/app/data \
+  -e STARRY_PG_DSN="postgres://user:pass@127.0.0.1:5432/starry?sslmode=disable" \
   -e STARRY_HEALTH_PORT=8848 \
   starry:latest -addr :8848 -proxy 127.0.0.1:18889 -data /app/data
 ```
 
 - If you change `-addr`, set `STARRY_HEALTH_PORT` accordingly or the container reports unhealthy
   while the service is actually fine
+- Pass `-proxy ""` to disable MITM recording
 - With `--network host` the container owns host ports directly — make sure nothing else is bound
 - Mounting the data directory keeps `jwt.key`, captures and reports across image upgrades
 
@@ -99,7 +116,7 @@ Grab a build from [Releases](https://github.com/szjakall/naiwa/releases/latest),
 
 ```bash
 cp config.example.json config.json   # fill in the database block
-./starry -addr :8787 -data ./data
+./starry -addr :8848 -data ./data
 ```
 
 The database can also come from `STARRY_PG_DSN=postgres://user:pass@host:5432/starry?sslmode=disable`.
@@ -120,7 +137,7 @@ CGO_ENABLED=0 go build -tags embedui -trimpath -o starry ./cmd/starry
 1. `/setup` to set the admin password, then sign in
 2. **System → LLM**: endpoint, model, key; mark it as the active profile
 3. **Chat → New chat**: pick agent, approval mode and platform on the goal bar
-4. Enter the goal, pick a round budget, hit **Auto-run**; the activity stream shows every tool call
+4. Enter the goal (use 📎 to attach files), pick a round limit (including **Unlimited**), hit **Auto-run**; the stream grows live and you can **Stop** at any time
 5. Products live under **Tasks / Assets / Findings / Traffic**; reports come from **System → Reports**
 
 ## Connecting an Android device
@@ -137,7 +154,7 @@ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh     # -> build/starry-droid.apk
 adb install -r build/starry-droid.apk
 
 # 3. In the app: console address + token
-#    ws://<console-host>:8787/ws/droid
+#    ws://<console-host>:8848/ws/droid
 ```
 
 Once online, the panel exposes shell, screenshot, logcat, packages, file I/O, capture and TCP tunnels.
@@ -171,8 +188,9 @@ deploy/          sample systemd unit
 | --- | --- |
 | `config.json` | database block (fields or a single `database.dsn`) |
 | `STARRY_PG_DSN` | environment variable, wins over `config.json` |
-| `-addr` | listen address, default `:8787` |
-| `-proxy` | MITM recorder port, default `:8788`; empty string disables |
+| `-addr` | listen address, default `:8848` |
+| `-proxy` | MITM recorder port, default `:18889`; empty string disables |
+| `STARRY_HEALTH_PORT` | HEALTHCHECK probe port — **must match `-addr`** (default 8848) |
 | `-data` | data directory (JWT key, traffic, captures, reports); defaults to `data/` next to the binary |
 | `STARRY_LLM_*` | default LLM settings (provider / model / base_url / proxy); can also be set in the UI |
 
@@ -182,7 +200,7 @@ deploy/          sample systemd unit
 
 **Frontend build gets OOM-killed** — the TypeScript check is memory hungry: `NODE_OPTIONS=--max-old-space-size=3072`, and add swap on machines under 4 GB.
 
-**Device will not connect** — the app must use `ws://<host>:8787/ws/droid` (not the page URL), the token must not be revoked, and the server log shows the handshake.
+**Device will not connect** — the app must use `ws://<host>:8848/ws/droid` (not the page URL), the token must not be revoked, and the server log shows the handshake.
 
 **Token list is empty although a device is online** — the list only shows active tokens; revoked rows stay in the database for audit.
 

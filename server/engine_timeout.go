@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"starry/agent"
 	"starry/db"
+	"starry/engine/harness"
+	"sync/atomic"
 )
 
 // 任务级超时协调器(见 docs/任务级超时与收尾设计.md §4/§8.5)。
@@ -159,7 +160,7 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	for e.inflightCount(t.ID) > 0 {
 		if time.Now().After(hardStop) {
 			log.Printf("[deadline] task %s drain 超时(%s),硬取消在跑 run", t.ID, settleDrainGrace)
-			e.cancelExec(t.ID)
+			e.cancelExecCause(t.ID, harness.ErrCancelSettled)
 			_ = sleepCtx(ctx, 3*time.Second) // 给 worker 分支一点时间落库/归类
 			break
 		}

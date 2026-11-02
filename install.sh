@@ -48,7 +48,7 @@ install_docker(){
   info "拉取镜像并启动…"
   docker compose pull || true
   docker compose up -d
-  ok "启动完成 → http://localhost:8787"
+  ok "启动完成 → http://localhost:8848"
   info "查看日志：docker compose logs -f starry"
 }
 

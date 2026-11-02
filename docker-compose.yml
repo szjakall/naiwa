@@ -3,7 +3,7 @@
 #   cp .env.example .env      # 至少设置 POSTGRES_PASSWORD
 #   docker compose up -d --build
 #
-# 打开 http://localhost:8787 ，首次进 /setup 设管理员密码。
+# 打开 http://localhost:8848 ，首次进 /setup 设管理员密码。
 #
 # 镜像默认从本仓库源码构建（build: .）。想用预构建镜像：注释掉 build 段，
 # 保留 image（ghcr.io/szjakall/naiwa:<tag>）即可。
@@ -43,8 +43,8 @@ services:
       STARRY_LLM_BASE_URL: ${STARRY_LLM_BASE_URL:-}
       STARRY_LLM_PROXY: ${STARRY_LLM_PROXY:-}
     ports:
-      - "${STARRY_PORT:-8787}:8787"        # 控制台
-      - "${STARRY_PROXY_PORT:-8788}:8788"  # MITM 抓包代理
+      - "${STARRY_PORT:-8848}:8848"        # 控制台
+      - "${STARRY_PROXY_PORT:-18889}:18889"  # MITM 抓包代理
     volumes:
       # 数据目录（jwt.key、流量录制、抓包、报告、物化的 skills）落宿主机，容器重建不丢
       - ./data:/app/data

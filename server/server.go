@@ -276,6 +276,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string) *Serv
 	if t := m.ActiveTask(); t != nil {
 		s.engine.Run(ctx, t)
 	}
+	// 服务重启后把「上一进程还在推进」的对话目标接回来（部署/重启不该等于手动停止）。
+	go func() {
+		time.Sleep(3 * time.Second) // 等 chat agent / LLM 配置就位
+		s.resumeInterruptedGoals()
+	}()
 	return s
 }
 
