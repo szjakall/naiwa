@@ -129,9 +129,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 						// stopped, so the session icon reflects that, not this run.
 						sum = "（运行被中断：任务暂停 / 终止 / 重启所致；未完成）"
 					case harness.ReasonTimeout, harness.ReasonMaxTurns:
-						// budget hit → settlement ran (facts/assets were written back);
-						// only the trailing text summary is missing, not a failure.
-						sum = "（达运行预算上限，已收尾写回事实；本次无文字总结，终态: " + string(ev.Terminal.Reason) + "）"
+						// 只在显式配置了预算时才会走到这里（对话已默认不限），
+						// 文案保持中性、不再出现"预算上限"字样。
+						sum = "（本轮结束，已写回事实）"
 					default:
 						sum = "（无总结，终态: " + string(ev.Terminal.Reason) + "）"
 					}

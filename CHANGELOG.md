@@ -41,6 +41,48 @@ Starry 是自主渗透测试控制台：会话 → 项目（任务）→ 资产 
 - 实测同一份抓包：111.30.187.245:8080 ↑436 B ↓200 B、211.95.34.130:443 ↑1016 B ↓824 B
   （修前第二条是 ↓0 B）
 
+### 安卓流量：抓包不再"看不见"
+
+- **根因**：设备端 tcpdump 把 pcap 写在手机上，只有 `capture_stop` 时才拉回控制台；
+  抓包进行中不点停止，列表里就没有任何记录
+- 新增 `POST /api/android/captures/pull` 与设备操作 `capture_pull`：**不打断抓包**，
+  先拉一份当前快照（文件名 `live-<时间>.pcap`）
+- 安卓流量页顶部加抓包控制条：选设备 → 开始抓包 / 拉取当前 / 停止并保存，
+  并提示"要拉取或停止后才会出现在列表"
+- 实测同一份设备抓包（286 报文）：DNS 解析出 `neverssl.com`、`example.com`；
+  TLS 通过 SNI 解析出 `security.browser.miui.com`、`neverssl.com`、`example.com`
+
+### 性能：传输、缓存、批量写、实时推送、子任务并行
+
+在“不改功能、不改上下文与输入输出限制”的前提下做纯性能优化：
+
+- **P1 传输层**：LLM 的 HTTP Transport 从默认 `MaxIdleConnsPerHost=2` 调到 32、连接 64、
+  空闲 90s、强制 HTTP/2；消除并发会话下反复建连/TLS 握手（“偶发卡十几秒”的主因之一）
+- **P5 前缀稳定**：工具 schema 按名字稳定排序后再发送，保证每轮请求前缀一致，
+  提高 prompt cache 命中率（实测该会话命中率 91%，顺序一乱就会掉）
+- **P4 活动批量写**：`emit` 改为“入队 + 50ms/32 条批量落库”，顺序与重试语义不变，
+  模型流不再被逐条 INSERT 拖住
+- **P2 SSE 实时推送**：新增 `GET /api/conversations/{id}/stream`，活动产生即推送；
+  前端用 EventSource 增量追加，1s 轮询降级为兜底。实测新会话里 `usage`/`result`
+  即时到达（此前最多等 1 秒一批）
+- **P3 增量渲染**：活动按 seq 去重增量追加；每条活动加 `content-visibility:auto`，
+  长会话（577 条）不再每轮全量重绘
+- **子任务并行（多 worker）**：新增工具 `subtask_spawn` / `subtask_join` / `subtask_list`。
+  主会话把互不依赖的子目标交给独立 worker（各自独立 transcript 会话，仍走同一审批门），
+  并发上限 4，主会话结束时自动取消。
+  实测：一句话让模型派两个子任务 → 两个 worker 并行执行并各自返回（A / B）→ join 汇总
+
+### 附件上传
+
+- 输入框左侧新增**附件按钮**（新对话与已有对话都有）：选文件即上传，显示文件名与大小，
+  可逐个移除；发送时随消息一起提交
+- `POST /api/attachments`：先落到 `data/attachments/pending/<id>/`（此时可能还没有会话 id），
+  单文件上限 32MB
+- 发送消息时服务端把 pending 文件**认领**进 `data/attachments/conv-<id>/`，
+  并在正文末尾追加附件清单（绝对路径 + 大小），模型用 `Read`/`Bash` 直接读取
+- 认领时校验路径必须位于 pending 目录内，避免变成任意文件读取入口；同名文件自动加随机前缀
+- 实测：上传 `note.txt` → 发送"附件里写了什么？" → 模型回答 `第一行：hello starry attachment`
+
 ### 部署
 
 - **默认 Docker 部署**：`Dockerfile` 改成多阶段（Node 22 构建前端 → Go 1.26 编单二进制 →

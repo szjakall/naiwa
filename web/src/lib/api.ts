@@ -281,6 +281,8 @@ export const api = {
         (adv?.respMax ? `&resp_max=${adv.respMax}` : "") +
         (adv?.body ? `&body=${encodeURIComponent(adv.body)}` : ""),
     ),
+  androidCapturePull: (device: string) =>
+    post<{ ok: boolean; capture: { name: string; size: number } }>("/android/captures/pull", { device }),
   androidCaptures: () => get<{ captures: AndroidCapture[] }>("/android/captures"),
   androidFlows: (name: string, limit = 500) =>
     get<AndroidCaptureDetail>(`/android/captures/${encodeURIComponent(name)}/flows?limit=${limit}`),
@@ -546,8 +548,31 @@ export const api = {
     ),
   conversationMsgDetail: (id: number, seq: number) =>
     get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),
-  sendConversationMessage: (id: number, message: string) =>
-    post<{ status: string }>(`/conversations/${id}/messages`, { message }),
+  uploadAttachment: async (file: File) => {
+    if (MOCK) throw new Error("演示模式不支持附件上传");
+    const form = new FormData();
+    form.append("file", file);
+    // 与 http() 同源同鉴权：multipart 不能带 Content-Type（boundary 由浏览器生成）。
+    const token = getToken();
+    const res = await fetch("/api/attachments", {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: form,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let msg = text;
+      try {
+        msg = (JSON.parse(text) as { error?: string }).error ?? text;
+      } catch {
+        /* 保留原文 */
+      }
+      throw new Error(msg || `上传失败（HTTP ${res.status}）`);
+    }
+    return JSON.parse(text) as { id: string; name: string; size: number; path: string };
+  },
+  sendConversationMessage: (id: number, message: string, attachments: string[] = []) =>
+    post<{ status: string }>(`/conversations/${id}/messages`, { message, attachments }),
   stopConversation: (id: number) => post<{ status: string }>(`/conversations/${id}/stop`, {}),
   saveAgentPrompt: (key: string, template: string, note = "") => put<{ version: number }>(`/agents/${key}/prompt`, { template, note }),
   resetAgentPrompt: (key: string) => post<{ version: number }>(`/agents/${key}/prompt/reset`, {}),

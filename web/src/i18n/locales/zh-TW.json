@@ -687,6 +687,10 @@
       "rounds": "輪",
       "budgetHint": "輪次預算：每輪是一次完整的模型執行；沒有工具呼叫的那一輪會提前停下",
       "unlimited": "不限"
+    },
+    "attach": {
+      "button": "上傳附件",
+      "remove": "移除附件"
     }
   },
   "transcript": {
@@ -1949,7 +1953,10 @@
     "deleteConfirm": "確認刪除報告「{{name}}」？此操作無法復原。",
     "format": "報告格式",
     "formatDocx": "Word 文件 (.docx)",
-    "formatMd": "Markdown 交付包 (.zip：md+截圖)"
+    "formatMd": "Markdown 交付包 (.zip：md+截圖)",
+    "exportSelected": "匯出選取（{{n}}）",
+    "selectAll": "全選",
+    "selectRow": "選擇該報告"
   },
   "devices": {
     "title": "安卓裝置",
@@ -2010,6 +2017,17 @@
     "noHandshake": "未捕獲到 TLS 握手（抓包視窗在連線建立之後開始），只有密文位元組",
     "requestPacket": "請求包",
     "responsePacket": "回應包",
-    "emptyPacket": "（該方向沒有資料）"
+    "emptyPacket": "（該方向沒有資料）",
+    "noDevice": "無線上裝置",
+    "startCapture": "開始抓包",
+    "pullNow": "拉取目前",
+    "stopCapture": "停止並儲存",
+    "captureTip": "抓包中的資料要「拉取目前」或「停止並儲存」後才會出現在左側清單",
+    "starting": "已下發抓包…",
+    "capturingHint": "抓包進行中：在手機瀏覽器造訪目標後點「拉取目前」",
+    "pulling": "正在拉取…",
+    "pulled": "已拉取 {name}（{size}）",
+    "stopping": "正在停止…",
+    "stopped": "已停止並儲存 {name}"
   }
 }

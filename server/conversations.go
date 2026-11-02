@@ -360,12 +360,21 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	var req struct{ Message string }
+	var req struct {
+		Message string `json:"message"`
+		// 附件：先 POST /api/attachments 拿到的路径；发送时认领进会话目录，
+		// 并把清单追加到正文（模型据此 Read/Bash 打开）。
+		Attachments []string `json:"attachments"`
+	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
 	msg := strings.TrimSpace(req.Message)
+	claimed := s.claimAttachments(c.ID, req.Attachments)
+	if note := attachmentNote(claimed); note != "" {
+		msg = strings.TrimSpace(msg + note)
+	}
 	if msg == "" {
 		writeErr(w, 400, "消息不能为空")
 		return
@@ -443,16 +452,27 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	}
 	pg := s.m.pg
 	maxTurns := s.agentMaxTurns(c.AgentKey)
-	maxDuration := time.Duration(s.agentRunSeconds(c.AgentKey)) * time.Second
+	// 对话不设墙钟预算：跑分/长任务常常一步就要十几分钟，到点被强制收尾会丢掉
+	// 正在进行的工作（只留下"达运行预算上限"这类空总结）。0 = 不限。
+	// 需要停就用「停止」按钮（会取消 ctx），而不是靠时间掐断。
+	var maxDuration time.Duration
 	webSearch := false
 	if a, err := pg.GetAgentByKey(c.AgentKey); err == nil && a != nil {
 		webSearch = a.WebSearch
 	}
 	sessionID := s.convBusyKey(c.ID) // "conv-<id>" transcript session
+	// 活动批量写：模型流不再被逐条 INSERT 拖住；顺序与重试语义保持不变。
+	writer := newActivityWriter(pg, c.ID)
+	defer func() {
+		writer.Flush()
+		writer.Close()
+		// 主会话结束（正常/停止/出错）→ 取消并清理它的子任务，避免后台残留。
+		s.shutdownSubtasks(c.ID)
+	}()
 	emit := func(rec db.Activity) {
-		if _, err := pg.AppendConvActivity(c.ID, rec); err != nil {
-			log.Printf("[conv %d] append activity failed: %v", c.ID, err)
-		}
+		writer.Append(rec)
+		// 实时推给订阅者（没人订阅时是空操作）；轮询路径仍然照常读到同一批数据。
+		s.activities.publish(c.ID, rec)
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.

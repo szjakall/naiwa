@@ -3,7 +3,18 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { Bot, ChevronDownIcon, PlusIcon, SendIcon, ShieldCheck, Smartphone, Square, Trash2Icon, ZapIcon } from "lucide-react";
+import {
+  Bot,
+  ChevronDownIcon,
+  PaperclipIcon,
+  PlusIcon,
+  SendIcon,
+  ShieldCheck,
+  Smartphone,
+  Square,
+  Trash2Icon,
+  ZapIcon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,7 +47,13 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { api } from "@/lib/api";
-import type { Activity, Agent, Conversation, LLMProfile } from "@/lib/types";
+import { auth } from "@/lib/auth";
+import type {
+  Activity,
+  Agent,
+  Conversation,
+  LLMProfile,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
@@ -70,6 +87,14 @@ function LiveBadge() {
 
 // Composer is the shared bottom input (textarea grows to a cap, Enter sends,
 // Shift+Enter newlines) — the same affordance across DraftChat and ChatView.
+type Attachment = { id: string; name: string; size: number; path: string };
+
+function fmtBytes(n: number): string {
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MB";
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + " KB";
+  return n + " B";
+}
+
 function Composer({
   value,
   onChange,
@@ -80,6 +105,10 @@ function Composer({
   running,
   onStop,
   stopDisabled,
+  attachments,
+  onAttach,
+  onRemoveAttachment,
+  attaching,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -90,6 +119,10 @@ function Composer({
   running?: boolean;
   onStop?: () => void;
   stopDisabled?: boolean;
+  attachments?: { id: string; name: string; size: number; path: string }[];
+  onAttach?: (file: File) => void;
+  onRemoveAttachment?: (id: string) => void;
+  attaching?: boolean;
 }) {
   const { t } = useTranslation();
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -98,9 +131,51 @@ function Composer({
       onSend();
     }
   }
+  const fileRef = React.useRef<HTMLInputElement | null>(null);
   return (
     <div className="border-t p-3">
+      {!!attachments?.length && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {attachments.map((a) => (
+            <span
+              key={a.id}
+              className="bg-muted inline-flex max-w-[16rem] items-center gap-1 rounded border px-2 py-0.5 text-[11px]"
+              title={a.path}
+            >
+              <PaperclipIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="truncate">{a.name}</span>
+              <span className="text-muted-foreground shrink-0">{fmtBytes(a.size)}</span>
+              <button
+                className="text-muted-foreground hover:text-foreground shrink-0"
+                onClick={() => onRemoveAttachment?.(a.id)}
+                title={t("chat.attach.remove")}
+              >
+                <Trash2Icon className="size-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex items-end gap-2">
+        <input
+          ref={fileRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onAttach?.(f);
+            e.target.value = "";
+          }}
+        />
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => fileRef.current?.click()}
+          disabled={disabled || attaching}
+          title={t("chat.attach.button")}
+        >
+          <PaperclipIcon className={"size-4 " + (attaching ? "animate-pulse" : "")} />
+        </Button>
         {leftSlot}
         <Textarea
           className="max-h-40 min-h-10 flex-1 resize-none"
@@ -279,6 +354,21 @@ function DraftChat({
   const [llmProfileId, setLlmProfileId] = React.useState<number | null>(null);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
+  const [attachments, setAttachments] = React.useState<Attachment[]>([]);
+  const [attaching, setAttaching] = React.useState(false);
+
+  // 上传先落到 pending 区（此时还没有会话 id），发送时再由服务端认领进会话目录。
+  async function attach(file: File) {
+    setAttaching(true);
+    try {
+      const up = await api.uploadAttachment(file);
+      setAttachments((prev) => [...prev, up]);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setAttaching(false);
+    }
+  }
 
   // default the agent to Auto once agents load.
   React.useEffect(() => {
@@ -296,7 +386,8 @@ function DraftChat({
         approval_mode: approval,
         platform,
       });
-      await api.sendConversationMessage(c.id, msg);
+      await api.sendConversationMessage(c.id, msg, attachments.map((a) => a.path));
+      setAttachments([]);
       onStarted(c);
     } catch (e) {
       toast.error(t("chat.toast.sendFailed", { msg: (e as Error).message }));
@@ -342,6 +433,10 @@ function DraftChat({
         value={input}
         onChange={setInput}
         onSend={send}
+        attachments={attachments}
+        onAttach={(f) => void attach(f)}
+        onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+        attaching={attaching}
         disabled={sending || !agentKey}
         placeholder={t("chat.composerPlaceholder")}
       />
@@ -474,6 +569,8 @@ function ChatView({
     setApproval(conv.approval_mode || "auto");
     setPlatform(conv.platform || "web");
   }, [conv.id, conv.approval_mode, conv.platform]);
+  const [attachments, setAttachments] = React.useState<Attachment[]>([]);
+  const [attaching, setAttaching] = React.useState(false);
   const cursorRef = React.useRef(0);
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
@@ -537,30 +634,67 @@ function ChatView({
     };
   }, [conv.id]);
 
-  // poll while a turn is running: pull new steps after the cursor.
+  // 实时：SSE 推送（活动产生即到）；轮询只做兜底与"补齐断档"。
   React.useEffect(() => {
-    if (!running) return;
     let live = true;
+    let sseOk = false;
+    const append = (items: Activity[]) => {
+      if (!items.length) return;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.seq));
+        const fresh = items.filter((m) => !seen.has(m.seq));
+        if (!fresh.length) return prev;
+        const next = [...prev, ...fresh];
+        cursorRef.current = Math.max(cursorRef.current, fresh[fresh.length - 1].seq);
+        return next;
+      });
+    };
+
     const tick = async () => {
       try {
         const r = await api.conversationMessages(conv.id, cursorRef.current);
         if (!live) return;
-        if (r.items.length) {
-          setMessages((prev) => [...prev, ...r.items]);
-          cursorRef.current = r.cursor;
-        }
+        append(r.items);
         setRunning(r.running);
-        if (!r.running) onTitleMaybeChanged(); // first-turn auto-title landed
+        if (!r.running) onTitleMaybeChanged();
       } catch {
-        /* transient — keep polling */
+        /* transient — 下一轮再试 */
       }
     };
+
+    // SSE：连上后把轮询降到 5s（只补断档），连不上就退回 1s 轮询。
+    const token = auth.getToken() ?? "";
+    let es: EventSource | null = null;
+    if (token) {
+      es = new EventSource(`/api/conversations/${conv.id}/stream?token=${encodeURIComponent(token)}`);
+      es.addEventListener("ready", () => {
+        sseOk = true;
+      });
+      es.addEventListener("activity", (ev) => {
+        try {
+          append([JSON.parse((ev as MessageEvent).data) as Activity]);
+        } catch {
+          /* 单条解析失败不影响后续 */
+        }
+      });
+      es.onerror = () => {
+        sseOk = false; // EventSource 自己会重连；期间靠轮询兜底
+      };
+    }
+
     const h = setInterval(tick, 1000);
+    const slow = setInterval(() => {
+      if (sseOk) void tick();
+    }, 5000);
+
+    void tick();
     return () => {
       live = false;
       clearInterval(h);
+      clearInterval(slow);
+      es?.close();
     };
-  }, [running, conv.id, onTitleMaybeChanged]);
+  }, [conv.id, onTitleMaybeChanged]);
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -618,13 +752,26 @@ function ChatView({
     return { i: I, o: O, cr: CR, turns, any: I + O + CR > 0 };
   }, [messages]);
 
+  async function attach(file: File) {
+    setAttaching(true);
+    try {
+      const up = await api.uploadAttachment(file);
+      setAttachments((prev) => [...prev, up]);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
   async function send() {
     const msg = input.trim();
     if (!msg || sending || running) return;
     setSending(true);
     setInput("");
     try {
-      await api.sendConversationMessage(conv.id, msg);
+      await api.sendConversationMessage(conv.id, msg, attachments.map((a) => a.path));
+      setAttachments([]);
       setRunning(true);
       // pull the just-persisted human turn immediately.
       const r = await api.conversationMessages(conv.id, cursorRef.current);
@@ -704,6 +851,10 @@ function ChatView({
         value={input}
         onChange={setInput}
         onSend={send}
+        attachments={attachments}
+        onAttach={(f) => void attach(f)}
+        onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+        attaching={attaching}
         disabled={running}
         placeholder={running ? t("chat.agentReplying") : t("chat.composerPlaceholder")}
         running={running}

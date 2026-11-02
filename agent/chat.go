@@ -34,6 +34,8 @@ type ChatAgent struct {
 	// devices 非 nil 时，把安卓设备工具集（device_list / device_exec / 文件 / logcat / packages）
 	// 挂进会话，让 agent 能直接操作手机。
 	devices actool.DeviceBridge
+	// subtasks 非 nil 时挂上子任务工具（subtask_spawn/join/list），让模型能并行推进子目标。
+	subtasks actool.SubtaskBridge
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -53,6 +55,9 @@ func (c *ChatAgent) SetGuard(g *guard.Guard) { c.guard = g }
 
 // SetDeviceBridge attaches the android device toolset (nil disables it).
 func (c *ChatAgent) SetDeviceBridge(b actool.DeviceBridge) { c.devices = b }
+
+// SetSubtaskBridge attaches the parallel-subtask toolset (nil disables it).
+func (c *ChatAgent) SetSubtaskBridge(b actool.SubtaskBridge) { c.subtasks = b }
 
 // chatWorkDirSpec returns a working-directory notice appended to every chat
 // agent's system prompt. Mirrors artifactSpec but without pentest-specific
@@ -99,6 +104,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	if c.devices != nil {
 		// 安卓设备工具与基础工具同层：模型不需要先"切换模式"，只要设备在线就能用。
 		base = append(base, actool.NewDeviceTools(c.devices)...)
+	}
+	if c.subtasks != nil {
+		base = append(base, actool.NewSubtaskTools(c.subtasks)...)
 	}
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()

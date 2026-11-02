@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"time"
 	"context"
 	"fmt"
 	"iter"
@@ -157,6 +158,15 @@ func NewProvider(cfg Config) (Provider, error) {
 // http.DefaultTransport so it keeps the standard timeouts and connection pool.
 func defaultHTTPClient(proxy string) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// 默认 Transport 的 MaxIdleConnsPerHost 只有 2：同一 provider 上并发几条会话
+	// （或工具并行发起的子请求）就会反复建连 + TLS 握手，表现为"偶发卡十几秒"。
+	// 这里按"单进程同时最多几十条到同一 host"来配，且强制 HTTP/2。
+	tr.MaxIdleConns = 64
+	tr.MaxIdleConnsPerHost = 32
+	tr.IdleConnTimeout = 90 * time.Second
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	tr.ExpectContinueTimeout = time.Second
+	tr.ForceAttemptHTTP2 = true
 	if proxy == "" {
 		tr.Proxy = http.ProxyFromEnvironment
 		return &http.Client{Transport: tr}, nil

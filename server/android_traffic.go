@@ -93,6 +93,26 @@ func (s *Server) androidCaptureFlows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, sum)
 }
 
+// POST /api/android/captures/pull {device} —— 抓包进行中先拉一份快照。
+// 设备侧 tcpdump 仍在写，这里只是把当前文件读回来；文件名用 live- 前缀区分。
+func (s *Server) androidCapturePull(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Device string `json:"device"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	key := strings.TrimSpace(req.Device)
+	if key == "" {
+		writeErr(w, 400, "缺少 device")
+		return
+	}
+	data, err := s.deviceOpData(r.Context(), key, "capture_pull", nil)
+	if err != nil {
+		writeErr(w, 502, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "capture": data})
+}
+
 // DELETE /api/android/captures/{name}
 func (s *Server) androidCaptureDelete(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(r.PathValue("name"))

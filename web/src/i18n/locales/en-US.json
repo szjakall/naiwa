@@ -687,6 +687,10 @@
       "rounds": "rounds",
       "budgetHint": "Round budget: one round is one full model run; a round with no tool calls stops early",
       "unlimited": "Unlimited"
+    },
+    "attach": {
+      "button": "Attach file",
+      "remove": "Remove attachment"
     }
   },
   "transcript": {
@@ -1949,7 +1953,10 @@
     "deleteConfirm": "Delete report \"{{name}}\"? This cannot be undone.",
     "format": "Format",
     "formatDocx": "Word (.docx)",
-    "formatMd": "Markdown bundle (.zip: md+images)"
+    "formatMd": "Markdown bundle (.zip: md+images)",
+    "exportSelected": "Export selected ({{n}})",
+    "selectAll": "Select all",
+    "selectRow": "Select this report"
   },
   "devices": {
     "title": "Android devices",
@@ -2010,6 +2017,17 @@
     "noHandshake": "TLS handshake not captured (capture started after the connection), ciphertext only",
     "requestPacket": "Request",
     "responsePacket": "Response",
-    "emptyPacket": "(no data in this direction)"
+    "emptyPacket": "(no data in this direction)",
+    "noDevice": "no device online",
+    "startCapture": "Start capture",
+    "pullNow": "Pull now",
+    "stopCapture": "Stop & save",
+    "captureTip": "Captured data only appears in the list after Pull now / Stop & save",
+    "starting": "capture started…",
+    "capturingHint": "capturing: browse on the phone, then hit Pull now",
+    "pulling": "pulling…",
+    "pulled": "pulled {name} ({size})",
+    "stopping": "stopping…",
+    "stopped": "stopped and saved {name}"
   }
 }

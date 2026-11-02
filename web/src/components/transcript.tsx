@@ -376,7 +376,7 @@ function ToolBlock({
   }
 
   return (
-    <div className="text-xs">
+    <div className="text-xs [contain-intrinsic-size:auto_2rem] [content-visibility:auto]">
       <button
         onClick={toggle}
         className="flex w-full min-w-0 items-start gap-2 overflow-hidden py-1 text-left hover:bg-muted/40"

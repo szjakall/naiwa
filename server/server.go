@@ -89,6 +89,13 @@ type Server struct {
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
 	chatCancel map[string]context.CancelFunc
+	// 子任务并行：按会话维护 worker 管理器。
+	subtaskMu sync.Mutex
+	subtasks  map[int64]*subtaskManager
+
+	// activities 是对话活动的 SSE 订阅中心（前端实时推送；轮询仍保留兜底）。
+	activities *activityBroker
+
 	// chatStop 记录本轮被人工停止，供目标轮次循环判断是否继续下一轮。
 	chatStop map[string]bool
 	// chatLock serializes main-agent turns PER TASK. A new steering message preempts
@@ -149,7 +156,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string) *Serv
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, chatBusy: map[string]bool{},
+	s := &Server{
+		activities: newActivityBroker(),m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelFunc{}, chatLock: map[string]*sync.Mutex{}, triggerQ: map[string][]triggeredRun{}, triggerRun: map[string]bool{},
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{}, reportJobs: map[string]*reportJob{},
 		enrichJobs: map[int64]*enrichJob{}, provCache: map[int64]llm.Provider{}, droid: droid.NewHub()}
@@ -442,7 +450,8 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
-	s.chatAgent.SetDeviceBridge(s) // 安卓设备工具（device_list / device_exec / 文件 / logcat / packages）
+	s.chatAgent.SetDeviceBridge(s)
+	s.chatAgent.SetSubtaskBridge(s) // 安卓设备工具（device_list / device_exec / 文件 / logcat / packages）
 	s.llmCfg = cfg
 	s.llmOn = true
 	s.cfgMu.Unlock()
@@ -520,6 +529,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
 	ca.SetDeviceBridge(s)
+	ca.SetSubtaskBridge(s)
 	s.profChatAgents[id] = ca
 	return ca
 }
@@ -650,6 +660,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
 	mux.HandleFunc("GET /api/traffic/upstream", s.getTrafficUpstream)
 	mux.HandleFunc("GET /api/android/captures", s.androidCaptures)
+	mux.HandleFunc("POST /api/android/captures/pull", s.androidCapturePull)
 	mux.HandleFunc("GET /api/android/captures/{name}/flows", s.androidCaptureFlows)
 	mux.HandleFunc("GET /api/android/captures/{name}/download", s.androidCaptureDownload)
 	mux.HandleFunc("DELETE /api/android/captures/{name}", s.androidCaptureDelete)
@@ -735,6 +746,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", s.pgSendConversationMessage)
 	mux.HandleFunc("POST /api/conversations/{id}/stop", s.pgStopConversation)
+	mux.HandleFunc("GET /api/conversations/{id}/stream", s.conversationStream)
+	mux.HandleFunc("POST /api/attachments", s.uploadAttachment)
 	mux.HandleFunc("POST /api/conversations/{id}/goal", s.conversationSetGoal)
 	mux.HandleFunc("POST /api/conversations/{id}/goal/run", s.conversationGoalRun)
 	mux.HandleFunc("GET /api/conversations/{id}/messages/{seq}", s.pgConversationMsgDetail)

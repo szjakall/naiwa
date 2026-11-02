@@ -83,6 +83,32 @@ export default function ReportsPage() {
   const [client, setClient] = React.useState("");
   const [locale, setLocale] = React.useState("zh-CN");
   const [format, setFormat] = React.useState("docx"); // docx | md
+  // 报告记录的多选（批量导出）：按 id 记录勾选，支持表头全选。
+  const [selReports, setSelReports] = React.useState<Set<number>>(new Set());
+  const toggleReport = (id: number) =>
+    setSelReports((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAllReports = (ids: number[]) =>
+    setSelReports((prev) => (prev.size === ids.length ? new Set() : new Set(ids)));
+  // 批量导出：逐个触发下载（浏览器对同域名并发下载有上限，留 300ms 间隔）。
+  function exportSelected() {
+    const ids = reports.filter((r) => selReports.has(r.id)).map((r) => r.id);
+    ids.forEach((id, index) => {
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = api.reportRecordDownloadUrl(id);
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }, index * 300);
+    });
+  }
+
   const [taskFindings, setTaskFindings] = React.useState<Finding[]>([]);
   const [selFindings, setSelFindings] = React.useState<Set<string>>(new Set());
   const [loadingFindings, setLoadingFindings] = React.useState(false);
@@ -475,15 +501,33 @@ export default function ReportsPage() {
             <CardTitle className="text-base">{t("reports.listTitle")}</CardTitle>
             <CardDescription>{t("reports.listHint")}</CardDescription>
           </div>
-          <Button size="sm" onClick={openDialog} disabled={generating}>
-            {generating ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
-            {generating ? t("reports.generating") : t("reports.newReport")}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={exportSelected}
+              disabled={selReports.size === 0}
+            >
+              <DownloadIcon />
+              {t("reports.exportSelected", { n: selReports.size })}
+            </Button>
+            <Button size="sm" onClick={openDialog} disabled={generating}>
+              {generating ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
+              {generating ? t("reports.generating") : t("reports.newReport")}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="px-0 pb-0">
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={reports.length > 0 && selReports.size === reports.length}
+                    onCheckedChange={() => toggleAllReports(reports.map((r) => r.id))}
+                    aria-label={t("reports.selectAll")}
+                  />
+                </TableHead>
                 <TableHead>{t("reports.colTask")}</TableHead>
                 <TableHead>{t("reports.colFile")}</TableHead>
                 <TableHead className="w-40">{t("reports.colCompany")}</TableHead>
@@ -495,6 +539,13 @@ export default function ReportsPage() {
             <TableBody>
               {reports.map((r) => (
                 <TableRow key={r.id}>
+                  <TableCell className="w-10">
+                    <Checkbox
+                      checked={selReports.has(r.id)}
+                      onCheckedChange={() => toggleReport(r.id)}
+                      aria-label={t("reports.selectRow")}
+                    />
+                  </TableCell>
                   <TableCell className="max-w-xs truncate" title={reportTaskLabel(r)}>{reportTaskLabel(r)}</TableCell>
                   <TableCell className="font-mono text-xs">{r.filename}</TableCell>
                   <TableCell className="text-muted-foreground">{r.company || "—"}</TableCell>
@@ -522,7 +573,7 @@ export default function ReportsPage() {
               ))}
               {reports.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground py-12 text-center text-sm">
+                  <TableCell colSpan={7} className="text-muted-foreground py-12 text-center text-sm">
                     <FileTextIcon className="mx-auto mb-2 size-8 opacity-40" />
                     {t("reports.empty")}
                   </TableCell>

@@ -4,14 +4,16 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sort"
+	"starry/engine/llm"
+	"starry/engine/permission"
+	"starry/engine/tool"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"starry/engine/llm"
-	"starry/engine/permission"
-	"starry/engine/tool"
+
 )
 
 // QueryInput is a fully-resolved request to run the loop.
@@ -348,6 +350,9 @@ func (l *loop) run() {
 	var schemas []llm.ToolSchema
 	if l.in.Tools != nil {
 		schemas = l.in.Tools.Schemas()
+		// 工具顺序必须是确定的：注册顺序受 MCP 发现/表驱动影响可能变化，而工具列表
+		// 位于请求前缀，顺序一变整段 prompt cache 就失效。按名字排序后每轮前缀一致。
+		sortToolSchemas(schemas)
 		// Deferred tools stay in the registry (callable via ExecuteExtraTool) but
 		// their schemas are withheld from the model to save context tokens.
 		if len(l.in.DeferredTools) > 0 {
@@ -565,6 +570,11 @@ func (l *loop) beginSettlement(reason TerminalReason, schemas *[]llm.ToolSchema)
 }
 
 // filterToolSchemas returns schemas with the named tools removed.
+// sortToolSchemas 按名字稳定排序，保证同一组工具每轮序列化结果完全一致。
+func sortToolSchemas(schemas []llm.ToolSchema) {
+	sort.SliceStable(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+}
+
 func filterToolSchemas(schemas []llm.ToolSchema, disabled []string) []llm.ToolSchema {
 	block := make(map[string]bool, len(disabled))
 	for _, d := range disabled {
