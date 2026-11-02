@@ -52,6 +52,7 @@ Starry 是自主渗透测试控制台：会话 → 项目（任务）→ 资产 
 - 实测同一份设备抓包（286 报文）：DNS 解析出 `neverssl.com`、`example.com`；
   TLS 通过 SNI 解析出 `security.browser.miui.com`、`neverssl.com`、`example.com`
 
+<<<<<<< HEAD
 ### 性能：传输、缓存、批量写、实时推送、子任务并行
 
 在“不改功能、不改上下文与输入输出限制”的前提下做纯性能优化：
@@ -83,6 +84,8 @@ Starry 是自主渗透测试控制台：会话 → 项目（任务）→ 资产 
 - 认领时校验路径必须位于 pending 目录内，避免变成任意文件读取入口；同名文件自动加随机前缀
 - 实测：上传 `note.txt` → 发送"附件里写了什么？" → 模型回答 `第一行：hello starry attachment`
 
+=======
+>>>>>>> 797fb21135ec530e9ccd664dfff8683c309e7a1c
 ### 部署
 
 - **默认 Docker 部署**：`Dockerfile` 改成多阶段（Node 22 构建前端 → Go 1.26 编单二进制 →
