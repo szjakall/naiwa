@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Starry 设备端</string>
+    <string name="channel_name">反连通道</string>
+    <string name="channel_desc">保持与 starry 控制台的反连，关闭后设备会离线</string>
+</resources>
